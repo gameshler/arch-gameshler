@@ -3,7 +3,7 @@
 1. [Introduction](#Introduction)
 
    - Pre-requisites & Checklist
-   - Preparing the USB and Booting the Installer
+   - Preparing the USB & Booting the Installer
 
 2. [Disk Partitioning](#Disk-Partitioning)
 
