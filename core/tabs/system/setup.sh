@@ -6,18 +6,17 @@ set -euo pipefail
 
 choose_installation() {
 
-    local options=("AU" "AT" "BY" "BE" "BR" "BG" "CA" "CL" "CN" "CO" "CZ" "DK" "EC" "FI"
-        "FR" "DE" "GR" "HK" "HU" "IS" "IN" "ID" "IR" "IE" "IL" "IT" "JP" "KZ"
-        "LV" "LT" "LU" "MK" "NL" "NC" "NZ" "NO" "PL" "PT" "RO" "RU" "RS" "SG"
-        "SK" "ZA" "KR" "ES" "SE" "CH" "TW" "TH" "TR" "UA" "GB" "US" "VN")
+    local options=("AU" "AT" "BY" "BE" "BR" "BG" "CA" "CL" "CN" "CO" "CZ" "DK" "EC" "FI" "FR" "DE" "GR" "HK" "HU" "IS" "IN" "ID" "IR" "IE" "IL" "IT" "JP" "KZ" "LV" "LT" "LU" "MK" "NL" "NC" "NZ" "NO" "PL" "PT" "RO" "RU" "RS" "SG" "SK" "ZA" "KR" "ES" "SE" "CH" "TW" "TH" "TR" "UA" "GB" "US" "VN")
 
     printf "Please select your country:\n"
 
     local i=1
     for code in "${options[@]}"; do
-        printf "%2d) %s\n" "$i" "$code"
+        printf "%2d)%s " "$i" "$code"
         ((i++))
+        if (( (i-1) % 10 == 0 )); then printf "\n"; fi
     done
+    printf "\n"
 
     local choice
     while :; do
