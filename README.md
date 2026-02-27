@@ -192,6 +192,41 @@ Generate `fstab`:
 genfstab -U /mnt >> /mnt/etc/fstab
 ```
 
+Edit `fstab`
+
+```bash
+vim /mnt/etc/fstab 
+
+# Change fmask(0137) and dmask(0027) value RWX based on this table
+```
+
+**Building Blocks:(The 4-2-1 Rule)**
+> Every permission digit is just the sum of these three numbers:
+
+| Value         | Permision              | Symbol   
+| ------------- |----------------------  |-------------  
+| 4             | Read                   | `r`   
+| 2             | Write                  | `w`   
+| 1             | Execute                | `x`   
+
+**Permissions Reference Table** 
+
+| Permision        | Octal Value (chmod)  | fmask/dmask Value | Symbol       
+| ---------------- |----------------------|-------------------|-----------
+| Full Access      | 7 (4+2+1)            | 0                 | `rwx`
+| Read & Write     | 6 (4+2)              | 1                 | `rw-`  
+| Read & Execute   | 5 (4+1)              | 2                 | `r-x`  
+| Read Only        | 4 (4)                | 3                 | `r--`  
+| Write & Execute  | 3 (2+1)              | 4                 | `-wx`  
+| Write Only       | 2 (2)                | 5                 | `-w-`  
+| Execute Only     | 1 (1)                | 6                 | `--x`  
+| No Access        | 0                    | 7                 | `---`  
+
+**Permision Order**
+- First Digit: USER (Owner)
+- Second Digit: The Group
+- Third Digit: Other
+
 **System Configuration**
   
 ```bash
