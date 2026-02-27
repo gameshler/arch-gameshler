@@ -192,7 +192,7 @@ Generate `fstab`:
 genfstab -U /mnt >> /mnt/etc/fstab
 ```
 
-Edit `fstab`
+Edit `fstab`:
 
 ```bash
 vim /mnt/etc/fstab 
