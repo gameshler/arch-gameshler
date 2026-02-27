@@ -121,6 +121,7 @@ Create and configure LVM inside the encrypted container:
 ```bash
 pvcreate /dev/mapper/cryptlvm
 vgcreate vg /dev/mapper/cryptlvm
+lvcreate -L 32G vg -n swap
 lvcreate -l 100%FREE vg -n root
 mkfs.ext4 /dev/vg/root
 ```
@@ -129,6 +130,8 @@ mkfs.ext4 /dev/vg/root
 
 ```bash
 mount /dev/vg/root /mnt
+mkswap /dev/vg/swap
+swapon /dev/vg/swap
 mkdir -p /mnt/boot/efi
 mount /dev/nvme0n1p1 /mnt/boot/efi
 ```
