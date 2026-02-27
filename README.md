@@ -255,6 +255,15 @@ vim /etc/vconsole.conf
 echo "myhostname" > /etc/hostname
 ```
 
+Host File Setup:
+
+```bash
+vim /etc/hosts
+   127.0.0.1   localhost
+   ::1         localhost
+   127.0.0.1   arch.localdomain   hostname 
+```
+
 Create user and configure sudo:
 
 ```bash
