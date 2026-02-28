@@ -431,9 +431,11 @@ vim /etc/mkinitcpio.conf
 ```bash
 bootctl install
 
+# set timeout to 4 if you need a bootmenu 
+
 vim /boot/efi/loader/loader.conf
     default         arch-linux.efi
-    timeout         4
+    timeout         0
     console-mode    auto
     editor          no
 ```
