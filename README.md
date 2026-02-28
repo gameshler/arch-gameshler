@@ -456,9 +456,9 @@ vim /etc/mkinitcpio.d/linux.preset
       ALL_config="/etc/mkinitcpio.conf"
       ALL_kver="/boot/vmlinuz-linux"
       PRESETS=('default')
-      default_uki="/efi/EFI/Linux/arch-linux.efi"
+      default_uki="/boot/efi/EFI/Linux/arch-linux.efi"
       default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
-      fallback_uki="/efi/EFI/Linux/arch-linux-fallback.efi"
+      fallback_uki="/boot/efi/EFI/Linux/arch-linux-fallback.efi"
       fallback_options="-S autodetect"
 ```
 ```bash
@@ -467,9 +467,9 @@ vim /etc/mkinitcpio.d/linux-lts.preset
       ALL_config="/etc/mkinitcpio.conf"
       ALL_kver="/boot/vmlinuz-linux-lts"
       PRESETS=('default')
-      default_uki="/efi/EFI/Linux/arch-linux-lts.efi"
+      default_uki="/boot/efi/EFI/Linux/arch-linux-lts.efi"
       default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
-      fallback_uki="/efi/EFI/Linux/arch-linux-lts-fallback.efi"
+      fallback_uki="/boot/efi/EFI/Linux/arch-linux-lts-fallback.efi"
       fallback_options="-S autodetect"
 ```
 
