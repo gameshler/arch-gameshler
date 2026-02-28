@@ -196,7 +196,7 @@ pacstrap /mnt base linux linux-firmware linux-lts amd-ucode sudo vim nano konsol
 > Choose this if you are going with mkinitcpio UKI
 
 ```bash
-pacstrap /mnt base linux linux-firmware linux-lts amd-ucode sudo vim lvm2 sbsigntools git ntfs-3g efibootmgr binutils networkmanager pacman
+pacstrap /mnt base linux linux-firmware linux-lts amd-ucode sudo vim lvm2 sbsigntools systemd systemd-ukify git ntfs-3g efibootmgr binutils networkmanager pacman
 ```
 
 Generate `fstab`:
