@@ -97,7 +97,7 @@ gdisk /dev/nvme0n1
 
 | Partition     | Description            | Mount Point   | Size       | Type Code
 | ------------- |----------------------  |-------------  |------------|----------
-| /dev/nvme0n1p1| EFI System Partition   | /dev/vg/root  | 1024MB (1G)| EF00
+| /dev/nvme0n1p1| EFI System Partition   | /boot/efi     | 1024MB (1G)| EF00
 | /dev/nvme0n1p2| LUKS2 Encrypted Volume | /             | Remaining  | 8309
 
 Format the EFI partition:
