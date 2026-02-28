@@ -471,7 +471,7 @@ mkinitcpio -P
 systemctl enable systemd-boot-update.service
 ```
 
-Exit chroot:
+**Exit chroot**
 
 ```bash
 umount -R /mnt
