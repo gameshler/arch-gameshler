@@ -673,21 +673,7 @@ pacman -S keepassxc
 ```bash
 sudo pacman -Syu
 sudo pacman -S plasma
-```
-
-Create login script /kde_plasma.sh:
-
-```bash
-vim /kde_plasma.sh
-
-#!/bin/bash
-/usr/lib/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland
-```
-
-Make it executable: 
-
-```bash
-chmod +x kde_plasma.sh
+sudo systemctl enable sddm.service 
 ```
 
 ### Arch DWM
