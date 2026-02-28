@@ -295,8 +295,12 @@ systemctl enable NetworkManager fstrim.timer
 
 ## Unified Kernel Image
 
-> [!IMPORTANT]  
-> Choose only one to create the UKI
+## Choose ONE UKI method before proceeding:
+
+**Dracut UKI** → Direct EFI boot (`bootx64.efi`), complex hooks
+**Mkinitcpio UKI** → systemd-boot + UKIs (`arch-linux.efi`), simpler, recommended
+
+> Most users: Choose Mkinitcpio UKI unless you have specific dracut needs
 
 ### Dracut UKI
 
