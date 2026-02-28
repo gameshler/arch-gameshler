@@ -471,6 +471,14 @@ mkinitcpio -P
 systemctl enable systemd-boot-update.service
 ```
 
+Exit chroot:
+
+```bash
+umount -R /mnt
+
+reboot
+```
+
 ## SecureBoot Configuration
 
 Enable Setup Mode in BIOS and erase old keys. Use sbctl to sign binaries.
