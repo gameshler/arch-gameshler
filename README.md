@@ -297,8 +297,8 @@ systemctl enable NetworkManager fstrim.timer
 
 ## Choose ONE UKI method before proceeding:
 
-**Dracut UKI** → Direct EFI boot (`bootx64.efi`), complex hooks
-**Mkinitcpio UKI** → systemd-boot + UKIs (`arch-linux.efi`), simpler, recommended
+- **Dracut UKI** → Direct EFI boot (`bootx64.efi`), complex hooks
+- **Mkinitcpio UKI** → systemd-boot + UKIs (`arch-linux.efi`), simpler, recommended
 
 > Most users: Choose Mkinitcpio UKI unless you have specific dracut needs
 
