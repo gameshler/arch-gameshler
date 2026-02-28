@@ -18,9 +18,8 @@
 
 4. [Unified Kernel Image (UKI) Setup](#Unified-Kernel-Image)
 
-   - Dracut Setup and Pacman Hooks
-   - Generating the Unified Kernel Image
-   - UEFI Boot Entry Configuration
+   - [Dracut UKI](#Dracut-UKI)
+   - [Mkinitcpio UKI](#Mkinitcpio-UKI)
 
 5. [SecureBoot Configuration](#SecureBoot-Configuration)
 
@@ -266,7 +265,7 @@ Host File Setup:
 vim /etc/hosts
    127.0.0.1   localhost
    ::1         localhost
-   127.0.1.1   arch.localdomain   hostname 
+   127.0.1.1   hostname.localdomain   hostname 
 ```
 
 Create user and configure sudo:
@@ -286,6 +285,9 @@ systemctl enable NetworkManager fstrim.timer
 ```
 
 ## Unified Kernel Image
+
+> [!IMPORTANT]  
+> Choose only one to create the UKI
 
 ### Dracut UKI
 
@@ -405,6 +407,28 @@ efibootmgr -b INDEX -B # removes previous uefi arch boot entries
 ```
 
 reboot and login to your system.
+
+### Mkinitcpio UKI
+
+**Hooks**
+
+```bash
+vim /etc/mkinitcpio.conf
+   HOOKS=(systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck)
+```
+
+**systemd boot configuration**
+
+```bash
+bootctl install
+
+vim /boot/efi/loader/loader.conf
+    default         arch-linux.efi
+    timeout         4
+    console-mode    auto
+    editor          no
+```
+
 
 ## SecureBoot Configuration
 
