@@ -187,8 +187,16 @@ Install essential packages:
 > [!IMPORTANT]  
 > UCODE package depends on your cpu whether its amd or intel 
 
+> Choose this if you are going with Dracut UKI
+
 ```bash
 pacstrap /mnt base linux linux-firmware linux-lts amd-ucode sudo vim nano konsole lvm2 dracut sbsigntools iwd git ntfs-3g efibootmgr binutils networkmanager pacman
+```
+
+> Choose this if you are going with mkinitcpio UKI
+
+```bash
+pacstrap /mnt base linux linux-firmware linux-lts amd-ucode sudo vim lvm2 sbsigntools git ntfs-3g efibootmgr binutils networkmanager pacman
 ```
 
 Generate `fstab`:
