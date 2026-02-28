@@ -447,9 +447,7 @@ vim /boot/efi/loader/loader.conf
 **Kernel Configuration**
 
 ```bash
-blkid -s UUID -o value /dev/nvme0n1p2 >> /etc/kernel/cmdline
-
-rd.luks.name=YOUR_UUID=cryptlvm root=/dev/vg/root rootfstype=ext4 rw quiet bgrt_disable 
+echo "rd.luks.name=$(blkid -s UUID -o value /dev/nvme0n1p2)=cryptlvm root=/dev/vg/root rootfstype=ext4 rw quiet bgrt_disable" > /etc/kernel/cmdline
 ```
 
 Edit linux preset:
