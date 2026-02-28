@@ -108,7 +108,8 @@ mkfs.fat -F32 /dev/nvme0n1p1
 
 **Creating Encrypted Volume and LVM**
 
-> The `allow discards` & `persistent` tags are not to be used if you are setting up a server
+> The `allow discards` & `persistent` tags are not to be used if you are setting up a server,
+> also dont enable fstrim.timer
 
 ```bash
 cryptsetup luksFormat --type luks2 /dev/nvme0n1p2
