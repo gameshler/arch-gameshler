@@ -507,11 +507,16 @@ sbctl status
 
 ```bash
 sbctl create-keys
+# Dracut
 sbctl sign -s /boot/efi/EFI/Linux/bootx64.efi
+
+# mkinitcpio
+sbctl sign -s /boot/efi/EFI/Linux/arch-linux.efi
+sbctl sign -s /boot/efi/EFI/Linux/arch-linux-lts.efi
 ```
 
 > [!NOTE]  
-> make sure db.key and db.pem are available `ls /var/lib/sbctl/keys/db` 
+> make sure db.key and db.pem are available `ls /var/lib/sbctl/keys/db`, 
 > Not needed for mkinitcpio UKI
 
 **Dracut Secure Boot Configuration:** 
