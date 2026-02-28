@@ -512,6 +512,7 @@ sbctl sign -s /boot/efi/EFI/Linux/bootx64.efi
 
 > [!NOTE]  
 > make sure db.key and db.pem are available `ls /var/lib/sbctl/keys/db` 
+> Not needed for mkinitcpio UKI
 
 **Dracut Secure Boot Configuration:** 
 
