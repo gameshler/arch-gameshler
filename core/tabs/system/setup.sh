@@ -66,7 +66,7 @@ main() {
         ;;
     *Radeon* | *AMD*)
         echo "Installing AMD drivers: xf86-video-amdgpu"
-        sudo "$PACKAGER" -S --noconfirm --needed vulkan-radeon lib32-vulkan-radeon mesa lib32-mesa xf86-video-amdgpu 
+        sudo "$PACKAGER" -S --noconfirm --needed vulkan-radeon lib32-vulkan-radeon mesa lib32-mesa xf86-video-amdgpu libva-mesa-driver lib32-libva-mesa-driver mesa-vdpau lib32-mesa-vdpau 
         ;;
     *Integrated\ Graphics\ Controller*)
         echo "Installing Intel drivers:"
