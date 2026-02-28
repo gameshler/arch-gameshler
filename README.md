@@ -429,6 +429,46 @@ vim /boot/efi/loader/loader.conf
     editor          no
 ```
 
+**Kernel Configuration**
+
+```bash
+blkid -s UUID -o value /dev/nvme0n1p2 >> /etc/kernel/cmdline
+
+rd.luks.name=YOUR_UUID=cryptlvm root=/dev/vg/root rootfstype=ext4 rw quiet bgrt_disable 
+```
+
+Edit linux preset:
+
+```bash
+vim /etc/mkinitcpio.d/linux.preset 
+   # uncomment
+      ALL_config="/etc/mkinitcpio.conf"
+      ALL_kver="/boot/vmlinuz-linux"
+      PRESETS=('default')
+      default_uki="/efi/EFI/Linux/arch-linux.efi"
+      default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
+      fallback_uki="/efi/EFI/Linux/arch-linux-fallback.efi"
+      fallback_options="-S autodetect"
+```
+```bash
+vim /etc/mkinitcpio.d/linux-lts.preset
+   # uncomment
+      ALL_config="/etc/mkinitcpio.conf"
+      ALL_kver="/boot/vmlinuz-linux-lts"
+      PRESETS=('default')
+      default_uki="/efi/EFI/Linux/arch-linux-lts.efi"
+      default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
+      fallback_uki="/efi/EFI/Linux/arch-linux-lts-fallback.efi"
+      fallback_options="-S autodetect"
+```
+
+**Generate UKI**
+
+```bash
+mkinitcpio -P
+
+systemctl enable systemd-boot-update.service
+```
 
 ## SecureBoot Configuration
 
