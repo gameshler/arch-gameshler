@@ -486,8 +486,7 @@ systemctl enable systemd-boot-update.service
 **Exit chroot**
 
 ```bash
-umount -R /mnt
-
+exit
 reboot
 ```
 
