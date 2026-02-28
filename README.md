@@ -739,15 +739,27 @@ sudo pacman -Sy
 
 uncomment the following lines:
 
-```
+```bash
 [multilib]
 Include = /etc/pacman.d/mirrorlist
 ```
 
 Update:
 
-```
+```bash
 sudo pacman -Syyu
+```
+
+### TLP (optional - Laptop specific)
+
+> Battery Life Optimization
+
+```bash
+pacman -S tlp
+
+systemctl enable tlp.service
+systemctl mask systemd-rfkill.socket
+systemctl mask systemd-rfkill.service
 ```
 
 ### corectrl (optional):
