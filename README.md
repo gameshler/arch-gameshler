@@ -522,7 +522,8 @@ vim /etc/dracut.conf.d/secureboot.conf
 ```
 
 > [!IMPORTANT]  
-> Fix needed for sbctl's pacman hook. Creating the following file will overshadow the real one
+> Fix needed for sbctl's pacman hook. Creating the following file will overshadow the real one,
+> Not needed if you are using mkinitcpio UKI
 
 ```bash
  vim /etc/pacman.d/hooks/zz-sbctl.hook
