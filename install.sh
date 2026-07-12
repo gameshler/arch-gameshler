@@ -59,7 +59,7 @@ trap on_err EXIT
 # ---------------------------------------------------------------------------
 readonly DEF_EFI_SIZE="1G"
 readonly DEF_TIMEZONE="Europe/London"
-readonly DEF_LOCALE="en_GB.UTF-8"
+readonly DEF_LOCALE="en_US.UTF-8"   # neutral default; fully overridable at the prompt
 readonly DEF_KEYMAP="us"
 
 # Populated by the prompt phase.
@@ -70,6 +70,8 @@ EFI_SIZE="$DEF_EFI_SIZE"
 SWAP_SIZE=""          # empty = no swap
 ROOT_SIZE=""          # empty = root takes all remaining space
 SEPARATE_HOME="no"    # yes = a dedicated /home LV takes the leftover space
+SYS_PROFILE="desktop" # desktop|server — gates fstrim.timer + LUKS discards
+VG_NAME="vg"          # chosen collision-free in setup_lvm (multi-disk safety)
 HOSTNAME=""
 USERNAME=""
 TIMEZONE=""
@@ -200,6 +202,10 @@ connect_wifi() {
     unset wpw
 }
 
+# Real reachability, not just link: route (ping an IP) AND DNS (ping a name).
+route_ok() { ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; }
+dns_ok()   { ping -c1 -W2 archlinux.org >/dev/null 2>&1; }
+
 setup_network() {
     phase "Network detection"
     if network_up; then
@@ -209,15 +215,23 @@ setup_network() {
         connect_wifi
     fi
 
-    info "Verifying connectivity..."
-    for _ in 1 2 3 4 5; do
-        if ping -c1 -W2 archlinux.org >/dev/null 2>&1; then
+    info "Verifying connectivity (route + DNS)..."
+    local i
+    for i in 1 2 3 4 5; do
+        if route_ok && dns_ok; then
             ok "Network is up."
             return 0
         fi
+        # A carrier can be up with no DHCP lease — nudge the ISO's networkd once.
+        [[ $i -eq 2 ]] && { info "No connectivity yet — retrying DHCP..."; systemctl restart systemd-networkd 2>/dev/null || true; }
         sleep 2
     done
-    die "Still offline. Connect a network manually (iwctl / dhcpcd) and re-run."
+
+    # Distinguish the failure so the message is actionable.
+    if route_ok; then
+        die "Link and routing are up, but DNS resolution fails. Check /etc/resolv.conf and re-run."
+    fi
+    die "Still offline (no route). Connect a network (iwctl / dhcpcd) and re-run."
 }
 
 # ---------------------------------------------------------------------------
@@ -269,16 +283,49 @@ choose_timezone() {
     resolve_timezone "$reply"
 }
 
-# Best-effort ISO country code from the timezone, for reflector mirror ranking.
-country_from_tz() {
-    case "$1" in
-        Europe/London) echo "GB" ;;
-        Europe/Paris)  echo "FR" ;;
-        Europe/Berlin) echo "DE" ;;
-        Asia/Almaty)   echo "KZ" ;;
-        America/New_York|America/Chicago|America/Denver|America/Los_Angeles) echo "US" ;;
-        *) echo "" ;;
-    esac
+# Pick a locale, validated against /etc/locale.gen, with a search helper.
+choose_locale() {
+    local reply term esc
+    read -rp "Locale [$DEF_LOCALE] (type 's' to search): " reply || true
+    reply="${reply:-$DEF_LOCALE}"
+    while :; do
+        if [[ "$reply" == "s" ]]; then
+            read -rp "  search (e.g. de_DE, fr, en_): " term || true
+            grep -iE -- "${term:-.}" /etc/locale.gen | sed -e 's/^#//' -e '/^ *$/d' | head -n 40 || true
+            read -rp "  locale: " reply || true
+            continue
+        fi
+        esc="${reply//./\\.}"
+        if grep -qiE "^#?[[:space:]]*${esc}[[:space:]]" /etc/locale.gen 2>/dev/null; then
+            LOCALE="$reply"
+            return 0
+        fi
+        warn "'$reply' isn't in /etc/locale.gen. Type 's' to search."
+        read -rp "  locale: " reply || true
+    done
+}
+
+# Pick a console keymap, validated against localectl, with a search helper.
+choose_keymap() {
+    local reply term keymaps
+    keymaps="$(localectl list-keymaps 2>/dev/null || true)"
+    read -rp "Console keymap [$DEF_KEYMAP] (type 's' to search): " reply || true
+    reply="${reply:-$DEF_KEYMAP}"
+    while :; do
+        if [[ "$reply" == "s" ]]; then
+            read -rp "  search (e.g. uk, de, fr): " term || true
+            printf '%s\n' "$keymaps" | grep -i -- "${term:-.}" | head -n 40 || true
+            read -rp "  keymap: " reply || true
+            continue
+        fi
+        # If localectl gave us a list, validate against it; otherwise accept.
+        if [[ -z "$keymaps" ]] || printf '%s\n' "$keymaps" | grep -qx -- "$reply"; then
+            KEYMAP="$reply"
+            return 0
+        fi
+        warn "'$reply' isn't a known keymap. Type 's' to search."
+        read -rp "  keymap: " reply || true
+    done
 }
 
 # Disk layout — beginner-friendly and small-disk-safe. Auto adapts to any disk;
@@ -368,8 +415,17 @@ gather_input() {
 
     echo
     choose_timezone
-    prompt_default LOCALE "Locale" "$DEF_LOCALE"
-    prompt_default KEYMAP "Keymap" "$DEF_KEYMAP"
+    choose_locale
+    choose_keymap
+
+    # System profile — drives TRIM policy (README note: no discards on servers).
+    echo
+    echo "System profile:"
+    echo "    1) Desktop / laptop / workstation — SSD TRIM enabled (fstrim.timer + LUKS discards)"
+    echo "    2) Server — no automatic TRIM, no LUKS discards"
+    local prof
+    prompt_default prof "  Choice" "1"
+    [[ "$prof" == "2" ]] && SYS_PROFILE="server" || SYS_PROFILE="desktop"
 
     # ucode auto-detect
     local vendor
@@ -404,31 +460,52 @@ confirm_wipe() {
     else
         printf '        - vg-root   rest       (ext4, /  — includes /home)\n'
     fi
-    printf '\n  Hostname: %s    User: %s    Timezone: %s\n  Microcode: %s\n\n' \
-        "$HOSTNAME" "$USERNAME" "$TIMEZONE" "${UCODE:-none}"
+    printf '\n  Hostname: %s    User: %s    Timezone: %s\n  Profile: %s    Microcode: %s\n\n' \
+        "$HOSTNAME" "$USERNAME" "$TIMEZONE" "$SYS_PROFILE" "${UCODE:-none}"
+
+    # Refuse if the target (or any partition of it) is mounted at a real path —
+    # catches picking the live USB, or a leftover /mnt from a failed run. Active
+    # swap ([SWAP]) is fine; the teardown handles it.
+    if lsblk -nro MOUNTPOINT "$DISK" 2>/dev/null | grep -q '^/'; then
+        die "$DISK has mounted partitions. Unmount them (or pick another disk) and re-run."
+    fi
 
     local reply
-    read -rp "Type the bare disk name ('$bare') to proceed, anything else aborts: " reply || true
-    [[ "$reply" == "$bare" ]] || die "Confirmation mismatch — no changes were written to any disk."
+    read -rp "Type the disk name '$bare' to confirm: " reply || true
+    reply="${reply//[[:space:]]/}"                       # ignore stray pasted whitespace
+    [[ "$reply" == "$bare" ]] || die "Name mismatch ('$reply' vs '$bare') — nothing was written."
+    read -rp "Final check — type YES (uppercase) to ERASE $DISK: " reply || true
+    [[ "$reply" == "YES" ]] || die "Not confirmed — nothing was written."
     ok "Confirmed. Proceeding."
 }
 
 # ---------------------------------------------------------------------------
 # Phase 5 — teardown + partition + encrypt
 # ---------------------------------------------------------------------------
+# Reinstall safety: tear down prior LUKS/LVM state **only on the target disk**,
+# never on other drives (a VG named "vg" may exist elsewhere).
 teardown_existing() {
-    info "Clearing any existing LVM/LUKS on the target (reinstall safety)..."
-    swapoff -a 2>/dev/null || true
+    info "Clearing existing LVM/LUKS on $DISK only (reinstall safety)..."
+    local dev vg holder
 
-    # Deactivate any VG whose PV lives on this disk, then close a lingering mapping.
-    local vg
-    while read -r vg; do
+    # 1. swapoff any swap LV/partition that sits on this disk.
+    while read -r dev; do
+        [[ -n "$dev" ]] && swapoff "$dev" 2>/dev/null || true
+    done < <(lsblk -pnro NAME,FSTYPE "$DISK" 2>/dev/null | awk '$2=="swap"{print $1}')
+
+    # 2. deactivate VGs whose PV is a crypt device on this disk, then a VG that
+    #    sits directly on a partition of this disk (LVM without LUKS).
+    while read -r holder; do
+        vg="$(pvs --noheadings -o vg_name "$holder" 2>/dev/null | tr -d ' ')"
         [[ -n "$vg" ]] && vgchange -an "$vg" 2>/dev/null || true
-    done < <(pvs --noheadings -o vg_name 2>/dev/null | awk '{$1=$1};1' | sort -u)
+    done < <(lsblk -pnro NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="crypt"||$2=="part"{print $1}')
 
-    cryptsetup close cryptlvm 2>/dev/null || true
+    # 3. close crypt mappings backed by this disk.
+    while read -r holder; do
+        cryptsetup close "$(basename "$holder")" 2>/dev/null || true
+    done < <(lsblk -pnro NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="crypt"{print $1}')
 
-    # Wipe old signatures on the partitions we are about to recreate.
+    # 4. wipe old signatures on the partitions we are about to recreate.
     wipefs -fa "$PART_EFI" 2>/dev/null || true
     wipefs -fa "$PART_LUKS" 2>/dev/null || true
 }
@@ -449,9 +526,16 @@ partition_disk() {
     mkfs.fat -F32 "$PART_EFI"
 
     info "Encrypting $PART_LUKS (LUKS2)"
-    printf '%s' "$LUKS_PW" | cryptsetup luksFormat --type luks2 "$PART_LUKS" -
-    printf '%s' "$LUKS_PW" | cryptsetup open --allow-discards --persistent "$PART_LUKS" cryptlvm -
-    ok "Encrypted container opened as /dev/mapper/cryptlvm"
+    # Discards leak some metadata about used blocks — README says no discards on
+    # servers. Desktop/laptop: enable for SSD TRIM; server: omit.
+    local -a open_opts=()
+    [[ "$SYS_PROFILE" != "server" ]] && open_opts=(--allow-discards --persistent)
+
+    # Passphrase read from stdin via --key-file - (no ambiguous trailing '-');
+    # --batch-mode skips the interactive "type YES" so the pipe doesn't hang.
+    printf '%s' "$LUKS_PW" | cryptsetup luksFormat --type luks2 --batch-mode --key-file - "$PART_LUKS"
+    printf '%s' "$LUKS_PW" | cryptsetup open --key-file - "${open_opts[@]}" "$PART_LUKS" cryptlvm
+    ok "Encrypted container opened as /dev/mapper/cryptlvm (profile: $SYS_PROFILE)"
 }
 
 # ---------------------------------------------------------------------------
@@ -460,31 +544,40 @@ partition_disk() {
 setup_lvm() {
     phase "LVM + filesystems"
 
-    pvcreate /dev/mapper/cryptlvm
-    vgcreate vg /dev/mapper/cryptlvm
-
-    [[ -n "$SWAP_SIZE" ]] && lvcreate -L "$SWAP_SIZE" vg -n swap
-    if [[ "$SEPARATE_HOME" == "yes" ]]; then
-        lvcreate -L "$ROOT_SIZE" vg -n root
-        lvcreate -l 100%FREE     vg -n home
-    else
-        lvcreate -l 100%FREE     vg -n root
+    # Pick a VG name that doesn't collide with one on another disk (multi-drive).
+    VG_NAME="vg"
+    if vgs --noheadings -o vg_name 2>/dev/null | tr -d ' ' | grep -qx "vg"; then
+        local n=0
+        while vgs --noheadings -o vg_name 2>/dev/null | tr -d ' ' | grep -qx "vg${n}"; do n=$((n+1)); done
+        VG_NAME="vg${n}"
+        warn "A volume group 'vg' already exists (another disk); using '$VG_NAME'."
     fi
 
-    mkfs.ext4 /dev/vg/root
-    [[ "$SEPARATE_HOME" == "yes" ]] && mkfs.ext4 /dev/vg/home
-    [[ -n "$SWAP_SIZE" ]] && mkswap /dev/vg/swap
+    pvcreate /dev/mapper/cryptlvm
+    vgcreate "$VG_NAME" /dev/mapper/cryptlvm
+
+    [[ -n "$SWAP_SIZE" ]] && lvcreate -L "$SWAP_SIZE" "$VG_NAME" -n swap
+    if [[ "$SEPARATE_HOME" == "yes" ]]; then
+        lvcreate -L "$ROOT_SIZE" "$VG_NAME" -n root
+        lvcreate -l 100%FREE     "$VG_NAME" -n home
+    else
+        lvcreate -l 100%FREE     "$VG_NAME" -n root
+    fi
+
+    mkfs.ext4 "/dev/${VG_NAME}/root"
+    [[ "$SEPARATE_HOME" == "yes" ]] && mkfs.ext4 "/dev/${VG_NAME}/home"
+    [[ -n "$SWAP_SIZE" ]] && mkswap "/dev/${VG_NAME}/swap"
 
     info "Mounting target"
-    mount /dev/vg/root /mnt
+    mount "/dev/${VG_NAME}/root" /mnt
     mkdir -p /mnt/boot/efi
     if [[ "$SEPARATE_HOME" == "yes" ]]; then
         mkdir -p /mnt/home
-        mount /dev/vg/home /mnt/home
+        mount "/dev/${VG_NAME}/home" /mnt/home
     fi
     mount "$PART_EFI" /mnt/boot/efi
-    [[ -n "$SWAP_SIZE" ]] && swapon /dev/vg/swap
-    ok "Filesystems mounted at /mnt"
+    [[ -n "$SWAP_SIZE" ]] && swapon "/dev/${VG_NAME}/swap"
+    ok "Filesystems mounted at /mnt (VG: $VG_NAME)"
 }
 
 # ---------------------------------------------------------------------------
@@ -493,20 +586,11 @@ setup_lvm() {
 install_base() {
     phase "Mirror ranking + base install"
 
-    local country
-    country="$GEO_COUNTRY"
-    [[ -n "$country" ]] || country="$(country_from_tz "$TIMEZONE")"
     if command -v reflector >/dev/null 2>&1; then
-        info "Ranking mirrors${country:+ (country: $country)}..."
-        if [[ -n "$country" ]]; then
-            reflector --country "$country" --protocol https --sort rate \
-                --save /etc/pacman.d/mirrorlist 2>/dev/null \
-                || warn "reflector failed; using default mirrorlist."
-        else
-            reflector --protocol https --sort rate --latest 20 \
-                --save /etc/pacman.d/mirrorlist 2>/dev/null \
-                || warn "reflector failed; using default mirrorlist."
-        fi
+        local -a rfl=(--protocol https --sort rate --latest 20 --save /etc/pacman.d/mirrorlist)
+        [[ -n "$GEO_COUNTRY" ]] && rfl=(--country "$GEO_COUNTRY" "${rfl[@]}")
+        info "Ranking mirrors${GEO_COUNTRY:+ (country: $GEO_COUNTRY)}..."
+        reflector "${rfl[@]}" 2>/dev/null || warn "reflector failed; keeping default mirrorlist."
     fi
 
     # mkinitcpio UKI package set (README.md:237), minus Secure Boot + base-devel.
@@ -535,15 +619,17 @@ install_base() {
 configure_system() {
     phase "System configuration (chroot)"
 
-    local luks_uuid
+    local luks_uuid root_uuid
     luks_uuid="$(blkid -s UUID -o value "$PART_LUKS")"
+    root_uuid="$(blkid -s UUID -o value "/dev/${VG_NAME}/root")"
     [[ -n "$luks_uuid" ]] || die "Could not read LUKS UUID from $PART_LUKS"
+    [[ -n "$root_uuid" ]] || die "Could not read root filesystem UUID"
 
-    # Export values consumed by the heredoc below.
+    # Only NON-SECRET values cross into the chroot environment. Passwords are set
+    # afterwards via a stdin pipe, so they never touch env, disk, or logs.
     export CH_TZ="$TIMEZONE" CH_LOCALE="$LOCALE" CH_KEYMAP="$KEYMAP" \
-           CH_HOST="$HOSTNAME" CH_USER="$USERNAME" \
-           CH_LUKS_UUID="$luks_uuid" \
-           CH_ROOT_PW="$ROOT_PW" CH_USER_PW="$USER_PW"
+           CH_HOST="$HOSTNAME" CH_USER="$USERNAME" CH_PROFILE="$SYS_PROFILE" \
+           CH_LUKS_UUID="$luks_uuid" CH_ROOT_UUID="$root_uuid"
 
     arch-chroot /mnt /usr/bin/env bash -euo pipefail <<'CHROOT'
 # --- timezone / clock ---
@@ -551,12 +637,12 @@ ln -sf "/usr/share/zoneinfo/$CH_TZ" /etc/localtime
 hwclock --systohc
 
 # --- locale ---
-sed -i "s/^#\s*\(${CH_LOCALE}\)/\1/" /etc/locale.gen
-grep -q "^${CH_LOCALE}" /etc/locale.gen || echo "${CH_LOCALE} UTF-8" >> /etc/locale.gen
+sed -i "s/^#[[:space:]]*\(${CH_LOCALE} \)/\1/" /etc/locale.gen
+grep -q "^${CH_LOCALE} " /etc/locale.gen || echo "${CH_LOCALE} UTF-8" >> /etc/locale.gen
 locale-gen
 echo "LANG=${CH_LOCALE}" > /etc/locale.conf
 
-# --- console keymap/font (README.md:302-305) ---
+# --- console keymap/font ---
 cat > /etc/vconsole.conf <<VCONSOLE
 KEYMAP=${CH_KEYMAP}
 FONT=Lat2-Terminus16
@@ -571,60 +657,63 @@ cat > /etc/hosts <<HOSTS
 127.0.1.1   ${CH_HOST}.localdomain   ${CH_HOST}
 HOSTS
 
-# --- users / passwords ---
-echo "root:${CH_ROOT_PW}" | chpasswd
+# --- user (password set later, outside this heredoc) ---
 useradd -m -G wheel "$CH_USER"
-echo "${CH_USER}:${CH_USER_PW}" | chpasswd
 
 # --- sudo for wheel via drop-in (never edit /etc/sudoers directly) ---
 echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel
 chmod 440 /etc/sudoers.d/10-wheel
 
-# --- services ---
-systemctl enable NetworkManager fstrim.timer
+# --- services (fstrim only when not a server) ---
+systemctl enable NetworkManager
+[ "$CH_PROFILE" != "server" ] && systemctl enable fstrim.timer
 
-# --- mkinitcpio HOOKS for systemd + sd-encrypt + lvm2 (README.md:468) ---
-sed -i 's/^HOOKS=.*/HOOKS=(systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
+# --- mkinitcpio HOOKS: sd-encrypt before lvm2 before filesystems (Arch wiki) ---
+sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
 
-# --- systemd-boot ---
-bootctl install
+# --- kernel cmdline: unlock LUKS by UUID, find root by filesystem UUID ---
+echo "rd.luks.name=${CH_LUKS_UUID}=cryptlvm root=UUID=${CH_ROOT_UUID} rootfstype=ext4 rw quiet bgrt_disable" > /etc/kernel/cmdline
+
+# --- UKI presets for linux + linux-lts (single 'default' image, README form) ---
+cat > /etc/mkinitcpio.d/linux.preset <<'PRESET'
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="/boot/vmlinuz-linux"
+PRESETS=('default')
+default_uki="/boot/efi/EFI/Linux/arch-linux.efi"
+default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
+PRESET
+
+cat > /etc/mkinitcpio.d/linux-lts.preset <<'PRESET'
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="/boot/vmlinuz-linux-lts"
+PRESETS=('default')
+default_uki="/boot/efi/EFI/Linux/arch-linux-lts.efi"
+default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
+PRESET
+
+# --- build the UKIs into the ESP ---
+mkdir -p /boot/efi/EFI/Linux
+mkinitcpio -P
+
+# --- systemd-boot: install to the ESP we chose; tolerate a chroot without
+#     writable EFI variables (falls back to plain file install). ---
+if ! bootctl --esp-path=/boot/efi install; then
+    echo "bootctl couldn't write EFI variables in chroot; installing loader files only." >&2
+    bootctl --esp-path=/boot/efi --no-variables install
+fi
 cat > /boot/efi/loader/loader.conf <<LOADER
 default         arch-linux.efi
 timeout         0
 console-mode    auto
 editor          no
 LOADER
-
-# --- kernel cmdline (README.md:488) ---
-echo "rd.luks.name=${CH_LUKS_UUID}=cryptlvm root=/dev/vg/root rootfstype=ext4 rw quiet bgrt_disable" > /etc/kernel/cmdline
-
-# --- UKI presets for linux + linux-lts (README.md:494-514) ---
-cat > /etc/mkinitcpio.d/linux.preset <<'PRESET'
-ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/boot/vmlinuz-linux"
-PRESETS=('default' 'fallback')
-default_uki="/boot/efi/EFI/Linux/arch-linux.efi"
-default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
-fallback_uki="/boot/efi/EFI/Linux/arch-linux-fallback.efi"
-fallback_options="-S autodetect"
-PRESET
-
-cat > /etc/mkinitcpio.d/linux-lts.preset <<'PRESET'
-ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/boot/vmlinuz-linux-lts"
-PRESETS=('default' 'fallback')
-default_uki="/boot/efi/EFI/Linux/arch-linux-lts.efi"
-default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
-fallback_uki="/boot/efi/EFI/Linux/arch-linux-lts-fallback.efi"
-fallback_options="-S autodetect"
-PRESET
-
-# Ensure the EFI/Linux dir exists, then build the UKIs.
-mkdir -p /boot/efi/EFI/Linux
-mkinitcpio -P
-
 systemctl enable systemd-boot-update.service
 CHROOT
+
+    # Set passwords WITHOUT env/heredoc exposure: piped to chpasswd over stdin,
+    # invisible to /proc/<pid>/environ, shell traces, and disk.
+    printf 'root:%s\n' "$ROOT_PW"           | arch-chroot /mnt chpasswd
+    printf '%s:%s\n' "$USERNAME" "$USER_PW" | arch-chroot /mnt chpasswd
 
     ok "System configured, UKIs generated, systemd-boot installed."
 }
@@ -636,7 +725,7 @@ finish() {
     phase "Finishing up"
 
     # Scrub secrets from the environment.
-    unset ROOT_PW USER_PW LUKS_PW CH_ROOT_PW CH_USER_PW
+    unset ROOT_PW USER_PW LUKS_PW
 
     info "Unmounting"
     swapoff -a 2>/dev/null || true
