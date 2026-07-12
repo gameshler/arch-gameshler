@@ -283,24 +283,44 @@ choose_timezone() {
     resolve_timezone "$reply"
 }
 
-# Pick a locale, validated against /etc/locale.gen, with a search helper.
+# Resolve a user-typed locale to the exact name in /etc/locale.gen, preferring
+# the UTF-8 variant. Echoes the canonical name (e.g. en_US.UTF-8) or nothing.
+# This is case-insensitive on input but always returns the file's real casing,
+# and a bare "en_US" resolves to en_US.UTF-8 (never the ISO-8859-1 entry).
+locale_canonical() {
+    awk -v want="$1" '
+        BEGIN { lw = tolower(want) }
+        {
+            line = $0; sub(/^#[ \t]*/, "", line)
+            if (line == "") next
+            split(line, f, /[ \t]+/); name = f[1]; cmap = toupper(f[2]); ln = tolower(name)
+            if (ln == lw && cmap == "UTF-8") { print name; exit }                       # exact UTF-8
+            if (ln == lw && exact == "") exact = name                                   # exact, any charmap
+            if (index(ln, lw ".") == 1 && cmap == "UTF-8" && pref == "") pref = name     # <token>.UTF-8
+        }
+        END { if (pref != "") print pref; else if (exact != "") print exact }
+    ' /etc/locale.gen
+}
+
+# Pick a locale, resolved to the canonical /etc/locale.gen name, with search.
 choose_locale() {
-    local reply term esc
+    local reply term canon
     read -rp "Locale [$DEF_LOCALE] (type 's' to search): " reply || true
     reply="${reply:-$DEF_LOCALE}"
     while :; do
         if [[ "$reply" == "s" ]]; then
             read -rp "  search (e.g. de_DE, fr, en_): " term || true
-            grep -iE -- "${term:-.}" /etc/locale.gen | sed -e 's/^#//' -e '/^ *$/d' | head -n 40 || true
+            grep -iE -- "${term:-.}" /etc/locale.gen | sed -e 's/^#[[:space:]]*//' -e '/^[[:space:]]*$/d' | head -n 40 || true
             read -rp "  locale: " reply || true
             continue
         fi
-        esc="${reply//./\\.}"
-        if grep -qiE "^#?[[:space:]]*${esc}[[:space:]]" /etc/locale.gen 2>/dev/null; then
-            LOCALE="$reply"
+        canon="$(locale_canonical "$reply" || true)"
+        if [[ -n "$canon" ]]; then
+            LOCALE="$canon"
+            if [[ "$canon" != "$reply" ]]; then info "Using locale '$canon'."; fi
             return 0
         fi
-        warn "'$reply' isn't in /etc/locale.gen. Type 's' to search."
+        warn "'$reply' has no match in /etc/locale.gen. Type 's' to search."
         read -rp "  locale: " reply || true
     done
 }
@@ -318,8 +338,9 @@ choose_keymap() {
             read -rp "  keymap: " reply || true
             continue
         fi
-        # If localectl gave us a list, validate against it; otherwise accept.
-        if [[ -z "$keymaps" ]] || printf '%s\n' "$keymaps" | grep -qx -- "$reply"; then
+        # If localectl gave us a list, validate against it (literal, not regex);
+        # otherwise accept.
+        if [[ -z "$keymaps" ]] || printf '%s\n' "$keymaps" | grep -Fxq -- "$reply"; then
             KEYMAP="$reply"
             return 0
         fi
@@ -429,13 +450,16 @@ gather_input() {
 
     # ucode auto-detect
     local vendor
-    vendor="$(grep -m1 vendor_id /proc/cpuinfo | awk '{print $NF}')"
+    vendor="$( (grep -m1 vendor_id /proc/cpuinfo || true) | awk '{print $NF}')"
     case "$vendor" in
         GenuineIntel) UCODE="intel-ucode" ;;
         AuthenticAMD) UCODE="amd-ucode" ;;
         *) UCODE=""; warn "Unknown CPU vendor ('$vendor') — skipping microcode package." ;;
     esac
-    [[ -n "$UCODE" ]] && ok "CPU microcode: $UCODE"
+    # NOTE: keep this an `if`, not `[[ ... ]] && ok`. As the last statement of the
+    # function the &&-list would return 1 when UCODE is empty and, under `set -e`,
+    # abort the whole installer on any non-Intel/AMD CPU.
+    if [[ -n "$UCODE" ]]; then ok "CPU microcode: $UCODE"; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -520,7 +544,15 @@ partition_disk() {
     sgdisk --new=1:0:+"$EFI_SIZE" --typecode=1:EF00 --change-name=1:EFI "$DISK"
     sgdisk --new=2:0:0            --typecode=2:8309 --change-name=2:cryptlvm "$DISK"
     partprobe "$DISK" 2>/dev/null || true
-    sleep 1
+    udevadm settle --timeout=15 2>/dev/null || true
+
+    # Hard gate: don't touch a partition node until the kernel has created it,
+    # otherwise mkfs/cryptsetup can race a slow udev (NVMe/USB) or a stale node.
+    local p n
+    for p in "$PART_EFI" "$PART_LUKS"; do
+        for ((n = 0; n < 50; n++)); do [[ -b "$p" ]] && break; sleep 0.1; done
+        [[ -b "$p" ]] || die "Partition $p never appeared after partitioning $DISK (udev/kernel did not settle)."
+    done
 
     info "Formatting EFI ($PART_EFI)"
     mkfs.fat -F32 "$PART_EFI"
@@ -535,6 +567,7 @@ partition_disk() {
     # --batch-mode skips the interactive "type YES" so the pipe doesn't hang.
     printf '%s' "$LUKS_PW" | cryptsetup luksFormat --type luks2 --batch-mode --key-file - "$PART_LUKS"
     printf '%s' "$LUKS_PW" | cryptsetup open --key-file - "${open_opts[@]}" "$PART_LUKS" cryptlvm
+    [[ -b /dev/mapper/cryptlvm ]] || die "cryptsetup open did not create /dev/mapper/cryptlvm."
     ok "Encrypted container opened as /dev/mapper/cryptlvm (profile: $SYS_PROFILE)"
 }
 
@@ -576,6 +609,8 @@ setup_lvm() {
         mount "/dev/${VG_NAME}/home" /mnt/home
     fi
     mount "$PART_EFI" /mnt/boot/efi
+    [[ "$(findmnt -no FSTYPE /mnt/boot/efi 2>/dev/null)" == "vfat" ]] \
+        || die "ESP is not mounted as vfat at /mnt/boot/efi."
     [[ -n "$SWAP_SIZE" ]] && swapon "/dev/${VG_NAME}/swap"
     ok "Filesystems mounted at /mnt (VG: $VG_NAME)"
 }
@@ -606,10 +641,24 @@ install_base() {
 
     info "Generating fstab"
     genfstab -U /mnt >> /mnt/etc/fstab
+    grep -qE '[[:space:]]/[[:space:]]' /mnt/etc/fstab \
+        || die "genfstab produced no root (/) entry — aborting before an unbootable install."
 
     # Harden the vfat EFI mount (README.md:246-279): fmask=0137,dmask=0027.
-    sed -i -E '/[[:space:]]vfat[[:space:]]/ s/(fmask=[0-9]+|dmask=[0-9]+),?//g; /[[:space:]]vfat[[:space:]]/ s/defaults/defaults,fmask=0137,dmask=0027/' \
-        /mnt/etc/fstab
+    # genfstab emits real options (rw,relatime,fmask=0022,...) with no 'defaults'
+    # token, so rewrite the vfat line's option field: drop any existing f/dmask,
+    # then append the hardened pair. awk only rebuilds the matched line; every
+    # other line (incl. comments) is printed byte-for-byte.
+    awk -v OFS='\t' '
+        $3=="vfat"{
+            n=split($4,o,","); opts=""
+            for(i=1;i<=n;i++) if(o[i] !~ /^(fmask|dmask)=/) opts=(opts==""?o[i]:opts","o[i])
+            $4=opts",fmask=0137,dmask=0027"
+        }
+        {print}
+    ' /mnt/etc/fstab > /mnt/etc/fstab.tmp && mv -f /mnt/etc/fstab.tmp /mnt/etc/fstab
+    grep -qE '[[:space:]]vfat[[:space:]].*fmask=0137,dmask=0027' /mnt/etc/fstab \
+        || die "Failed to apply EFI vfat hardening (fmask/dmask) to fstab."
     ok "Base system installed."
 }
 
@@ -620,8 +669,8 @@ configure_system() {
     phase "System configuration (chroot)"
 
     local luks_uuid root_uuid
-    luks_uuid="$(blkid -s UUID -o value "$PART_LUKS")"
-    root_uuid="$(blkid -s UUID -o value "/dev/${VG_NAME}/root")"
+    luks_uuid="$(blkid -s UUID -o value "$PART_LUKS" || true)"
+    root_uuid="$(blkid -s UUID -o value "/dev/${VG_NAME}/root" || true)"
     [[ -n "$luks_uuid" ]] || die "Could not read LUKS UUID from $PART_LUKS"
     [[ -n "$root_uuid" ]] || die "Could not read root filesystem UUID"
 
@@ -636,9 +685,14 @@ configure_system() {
 ln -sf "/usr/share/zoneinfo/$CH_TZ" /etc/localtime
 hwclock --systohc
 
-# --- locale ---
-sed -i "s/^#[[:space:]]*\(${CH_LOCALE} \)/\1/" /etc/locale.gen
-grep -q "^${CH_LOCALE} " /etc/locale.gen || echo "${CH_LOCALE} UTF-8" >> /etc/locale.gen
+# --- locale: uncomment the exact entry whose first field == the canonical name
+#     (CH_LOCALE came from locale_canonical, so it matches /etc/locale.gen verbatim) ---
+awk -v L="$CH_LOCALE" '
+    { c = $0; sub(/^#[ \t]*/, "", c); split(c, f, /[ \t]+/); if (f[1] == L) sub(/^#[ \t]*/, "", $0) }
+    { print }
+' /etc/locale.gen > /etc/locale.gen.tmp && mv -f /etc/locale.gen.tmp /etc/locale.gen
+awk -v L="$CH_LOCALE" '$0 !~ /^#/ && $1 == L { found = 1 } END { exit found ? 0 : 1 }' /etc/locale.gen \
+    || { echo "locale '$CH_LOCALE' is not enabled in /etc/locale.gen" >&2; exit 1; }
 locale-gen
 echo "LANG=${CH_LOCALE}" > /etc/locale.conf
 
@@ -695,12 +749,20 @@ PRESET
 mkdir -p /boot/efi/EFI/Linux
 mkinitcpio -P
 
+# Hard gate: mkinitcpio can print errors yet exit 0 on some preset mistakes.
+# Refuse to finish with a machine that has no bootable kernel image.
+for u in /boot/efi/EFI/Linux/arch-linux.efi /boot/efi/EFI/Linux/arch-linux-lts.efi; do
+    [ -s "$u" ] || { echo "UKI $u was not produced by mkinitcpio — aborting." >&2; exit 1; }
+done
+
 # --- systemd-boot: install to the ESP we chose; tolerate a chroot without
 #     writable EFI variables (falls back to plain file install). ---
 if ! bootctl --esp-path=/boot/efi install; then
     echo "bootctl couldn't write EFI variables in chroot; installing loader files only." >&2
     bootctl --esp-path=/boot/efi --no-variables install
 fi
+[ -f /boot/efi/EFI/systemd/systemd-bootx64.efi ] \
+    || { echo "systemd-boot loader was not installed to the ESP — aborting." >&2; exit 1; }
 cat > /boot/efi/loader/loader.conf <<LOADER
 default         arch-linux.efi
 timeout         0
