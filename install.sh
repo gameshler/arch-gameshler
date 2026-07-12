@@ -58,8 +58,6 @@ trap on_err EXIT
 # Defaults (all overridable at the prompts) — mirror README.md
 # ---------------------------------------------------------------------------
 readonly DEF_EFI_SIZE="1G"
-readonly DEF_SWAP_SIZE="32G"
-readonly DEF_ROOT_SIZE="100G"
 readonly DEF_TIMEZONE="Europe/London"
 readonly DEF_LOCALE="en_GB.UTF-8"
 readonly DEF_KEYMAP="us"
@@ -68,12 +66,14 @@ readonly DEF_KEYMAP="us"
 DISK=""
 PART_EFI=""
 PART_LUKS=""
-EFI_SIZE=""
-SWAP_SIZE=""
-ROOT_SIZE=""
+EFI_SIZE="$DEF_EFI_SIZE"
+SWAP_SIZE=""          # empty = no swap
+ROOT_SIZE=""          # empty = root takes all remaining space
+SEPARATE_HOME="no"    # yes = a dedicated /home LV takes the leftover space
 HOSTNAME=""
 USERNAME=""
 TIMEZONE=""
+GEO_COUNTRY=""        # ISO country code from geo-IP, for mirror ranking
 LOCALE=""
 KEYMAP=""
 UCODE=""
@@ -92,6 +92,20 @@ part_name() {
         *nvme*|*mmcblk*|*loop*) p="p" ;;
     esac
     printf '%s%s%s' "$disk" "$p" "$num"
+}
+
+# Total RAM in whole GiB (rounded up) — used to suggest a swap size.
+ram_gib() {
+    local kib
+    kib="$(awk '/MemTotal/{print $2}' /proc/meminfo)"
+    echo $(( (kib + 1048575) / 1048576 ))
+}
+
+# Size of a whole-disk device in whole GiB.
+disk_gib() {
+    local bytes
+    bytes="$(blockdev --getsize64 "$1" 2>/dev/null || echo 0)"
+    echo $(( bytes / 1073741824 ))
 }
 
 # Prompt with a default: prompt_default VAR "Question" "default"
@@ -209,23 +223,50 @@ setup_network() {
 # ---------------------------------------------------------------------------
 # Phase 3 — interactive prompts (the only manual input)
 # ---------------------------------------------------------------------------
-choose_timezone() {
-    local reply
+# Best-effort timezone guess from the public IP (needs network). Returns a valid
+# zone on stdout, or non-zero if it can't determine one.
+detect_timezone() {
+    local tz="" url
+    for url in "https://ipapi.co/timezone" "https://ipinfo.io/timezone"; do
+        tz="$(curl -fsSL --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+        [[ -n "$tz" && -f "/usr/share/zoneinfo/$tz" ]] && { printf '%s' "$tz"; return 0; }
+    done
+    return 1
+}
+
+# Loop a search helper until the user names a valid zone. Seeds with $1.
+resolve_timezone() {
+    local reply="$1" term
     while :; do
-        read -rp "Timezone [$DEF_TIMEZONE] (or type 'l' to search): " reply || true
-        reply="${reply:-$DEF_TIMEZONE}"
-        if [[ "$reply" == "l" ]]; then
-            local term
-            read -rp "  search term (e.g. London, Almaty): " term || true
+        if [[ "$reply" == "s" || "$reply" == "l" ]]; then
+            read -rp "  search (e.g. London, Almaty, New_York): " term || true
             timedatectl list-timezones | grep -i -- "${term:-.}" | head -n 40 || true
+            read -rp "  timezone: " reply || true
             continue
         fi
         if [[ -f "/usr/share/zoneinfo/$reply" ]]; then
             TIMEZONE="$reply"
             return 0
         fi
-        warn "'$reply' is not a valid zone. Type 'l' to search."
+        warn "'$reply' is not a valid zone. Type 's' to search by city."
+        read -rp "  timezone: " reply || true
     done
+}
+
+choose_timezone() {
+    local detected reply
+    detected="$(detect_timezone || true)"
+
+    if [[ -n "$detected" ]]; then
+        GEO_COUNTRY="$(curl -fsSL --max-time 5 https://ipapi.co/country 2>/dev/null | tr -d '[:space:]')"
+        read -rp "Timezone — detected '$detected'. Enter to accept, type another, or 's' to search: " reply || true
+        reply="${reply:-$detected}"
+    else
+        warn "Couldn't auto-detect your timezone."
+        read -rp "Timezone [$DEF_TIMEZONE] (type 's' to search by city): " reply || true
+        reply="${reply:-$DEF_TIMEZONE}"
+    fi
+    resolve_timezone "$reply"
 }
 
 # Best-effort ISO country code from the timezone, for reflector mirror ranking.
@@ -240,6 +281,64 @@ country_from_tz() {
     esac
 }
 
+# Disk layout — beginner-friendly and small-disk-safe. Auto adapts to any disk;
+# Custom gives full control. Swap is optional in both modes.
+configure_layout() {
+    local dsize sug_swap mode ans root_g
+
+    dsize="$(disk_gib "$DISK")"
+    sug_swap="$(ram_gib)"
+    (( sug_swap > 8 )) && sug_swap=8          # keep the suggestion small-disk friendly
+
+    echo
+    info "Disk: $DISK (~${dsize} GiB)"
+    echo "  How should the disk be laid out?"
+    echo "    1) Auto   — 1 GiB boot, optional swap, the rest for your system (recommended)"
+    echo "    2) Custom — pick swap and root sizes, and an optional separate /home"
+    prompt_default mode "  Choice" "1"
+
+    EFI_SIZE="$DEF_EFI_SIZE"
+
+    # --- swap (both modes; 0 = none) ---
+    echo
+    echo "  Swap is disk space used as backup memory. Enter 0 to skip it."
+    while :; do
+        prompt_default ans "  Swap size in GiB (0 = none)" "$sug_swap"
+        [[ "$ans" =~ ^[0-9]+$ ]] || { warn "Enter a whole number of GiB."; continue; }
+        (( ans == 0 )) && SWAP_SIZE="" || SWAP_SIZE="${ans}G"
+        break
+    done
+
+    if [[ "$mode" == "2" ]]; then
+        prompt_default ans "  Separate /home partition? (y/N)" "N"
+        case "${ans,,}" in
+            y|yes) SEPARATE_HOME="yes" ;;
+            *)     SEPARATE_HOME="no" ;;
+        esac
+        if [[ "$SEPARATE_HOME" == "yes" ]]; then
+            while :; do
+                prompt_default root_g "  Root (/) size in GiB" "20"
+                [[ "$root_g" =~ ^[0-9]+$ ]] && (( root_g > 0 )) && { ROOT_SIZE="${root_g}G"; break; }
+                warn "Enter a whole number of GiB."
+            done
+            echo "  /home will use the remaining space."
+        else
+            ROOT_SIZE=""      # root takes the rest
+        fi
+    else
+        SEPARATE_HOME="no"
+        ROOT_SIZE=""          # root takes the rest
+    fi
+
+    # --- sanity: make sure the fixed pieces fit, leaving room for root ---
+    local swap_g="${SWAP_SIZE%G}"; swap_g="${swap_g:-0}"
+    local root_need="${ROOT_SIZE%G}"; root_need="${root_need:-0}"
+    local fixed=$(( 1 + swap_g + root_need ))     # EFI(1) + swap + any fixed root
+    if (( dsize > 0 && fixed + 1 > dsize )); then
+        die "Requested layout (~${fixed} GiB) won't fit on a ~${dsize} GiB disk. Reduce swap/root and re-run."
+    fi
+}
+
 gather_input() {
     phase "Configuration prompts"
 
@@ -247,20 +346,16 @@ gather_input() {
     lsblk -dpno NAME,SIZE,MODEL | grep -vE 'loop|sr0' || true
     echo
     while :; do
-        prompt_required DISK "Target disk (full path, e.g. /dev/nvme0n1)"
+        prompt_required DISK "Target disk (e.g. /dev/vda or just vda)"
+        [[ "$DISK" != /dev/* && -b "/dev/$DISK" ]] && DISK="/dev/$DISK"
         [[ -b "$DISK" ]] && break
-        warn "'$DISK' is not a block device."
+        warn "'$DISK' is not a block device. Pick one from the list above."
     done
 
     PART_EFI="$(part_name "$DISK" 1)"
     PART_LUKS="$(part_name "$DISK" 2)"
 
-    echo
-    info "Disk layout (Enter to accept README defaults):"
-    prompt_default EFI_SIZE  "  EFI size"  "$DEF_EFI_SIZE"
-    prompt_default SWAP_SIZE "  swap size" "$DEF_SWAP_SIZE"
-    prompt_default ROOT_SIZE "  root size" "$DEF_ROOT_SIZE"
-    echo "  home will use 100% of the remaining space."
+    configure_layout
 
     echo
     prompt_required HOSTNAME "Hostname"
@@ -294,21 +389,24 @@ confirm_wipe() {
     phase "Confirm disk wipe"
     local bare="${DISK##*/}"
 
-    cat <<EOF
-${C_YELLOW}${C_BOLD}
-  EVERYTHING on ${DISK} will be ERASED.${C_RESET}
+    printf '%s%s\n  EVERYTHING on %s will be ERASED.%s\n\n' "$C_YELLOW" "$C_BOLD" "$DISK" "$C_RESET"
+    echo "  Planned layout:"
+    printf '    %s   EFI System Partition   %s   (FAT32, /boot/efi)\n' "$PART_EFI" "$EFI_SIZE"
+    printf '    %s   LUKS2 encrypted container (rest of disk)\n' "$PART_LUKS"
+    if [[ -n "$SWAP_SIZE" ]]; then
+        printf '        - vg-swap   %s\n' "$SWAP_SIZE"
+    else
+        printf '        - (no swap)\n'
+    fi
+    if [[ "$SEPARATE_HOME" == "yes" ]]; then
+        printf '        - vg-root   %s   (ext4, /)\n' "$ROOT_SIZE"
+        printf '        - vg-home   rest       (ext4, /home)\n'
+    else
+        printf '        - vg-root   rest       (ext4, /  — includes /home)\n'
+    fi
+    printf '\n  Hostname: %s    User: %s    Timezone: %s\n  Microcode: %s\n\n' \
+        "$HOSTNAME" "$USERNAME" "$TIMEZONE" "${UCODE:-none}"
 
-  Planned layout:
-    ${PART_EFI}   EFI System Partition   ${EFI_SIZE}   (FAT32, /boot/efi)
-    ${PART_LUKS}   LUKS2 container        rest
-        └─ vg-swap   ${SWAP_SIZE}
-        └─ vg-root   ${ROOT_SIZE}   (ext4, /)
-        └─ vg-home   100%FREE       (ext4, /home)
-
-  Hostname: ${HOSTNAME}    User: ${USERNAME}    Timezone: ${TIMEZONE}
-  Microcode: ${UCODE:-none}
-
-EOF
     local reply
     read -rp "Type the bare disk name ('$bare') to proceed, anything else aborts: " reply || true
     [[ "$reply" == "$bare" ]] || die "Confirmation mismatch — no changes were written to any disk."
@@ -364,20 +462,28 @@ setup_lvm() {
 
     pvcreate /dev/mapper/cryptlvm
     vgcreate vg /dev/mapper/cryptlvm
-    lvcreate -L "$SWAP_SIZE" vg -n swap
-    lvcreate -L "$ROOT_SIZE" vg -n root
-    lvcreate -l 100%FREE     vg -n home
+
+    [[ -n "$SWAP_SIZE" ]] && lvcreate -L "$SWAP_SIZE" vg -n swap
+    if [[ "$SEPARATE_HOME" == "yes" ]]; then
+        lvcreate -L "$ROOT_SIZE" vg -n root
+        lvcreate -l 100%FREE     vg -n home
+    else
+        lvcreate -l 100%FREE     vg -n root
+    fi
 
     mkfs.ext4 /dev/vg/root
-    mkfs.ext4 /dev/vg/home
-    mkswap /dev/vg/swap
+    [[ "$SEPARATE_HOME" == "yes" ]] && mkfs.ext4 /dev/vg/home
+    [[ -n "$SWAP_SIZE" ]] && mkswap /dev/vg/swap
 
     info "Mounting target"
     mount /dev/vg/root /mnt
-    mkdir -p /mnt/home /mnt/boot/efi
-    mount /dev/vg/home /mnt/home
+    mkdir -p /mnt/boot/efi
+    if [[ "$SEPARATE_HOME" == "yes" ]]; then
+        mkdir -p /mnt/home
+        mount /dev/vg/home /mnt/home
+    fi
     mount "$PART_EFI" /mnt/boot/efi
-    swapon /dev/vg/swap
+    [[ -n "$SWAP_SIZE" ]] && swapon /dev/vg/swap
     ok "Filesystems mounted at /mnt"
 }
 
@@ -388,7 +494,8 @@ install_base() {
     phase "Mirror ranking + base install"
 
     local country
-    country="$(country_from_tz "$TIMEZONE")"
+    country="$GEO_COUNTRY"
+    [[ -n "$country" ]] || country="$(country_from_tz "$TIMEZONE")"
     if command -v reflector >/dev/null 2>&1; then
         info "Ranking mirrors${country:+ (country: $country)}..."
         if [[ -n "$country" ]]; then
