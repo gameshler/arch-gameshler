@@ -64,7 +64,16 @@ Before you begin, ensure:
 
 ## System Automation 
 
-Run the full setup using: 
+**Automated base install (from the live Arch ISO):** partitions, encrypts (LUKS2),
+sets up LVM, pacstraps the base system, and builds the mkinitcpio UKI + systemd-boot —
+the whole manual flow below, in minutes. Prompts only for the human bits (disk,
+hostname, user, passwords, timezone/locale/keymap). Secure Boot stays manual (see below).
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/gameshler/archsetup/main/install.sh)
+```
+
+**Post-install setup (after first boot):** firewall, dotfiles, dwm, and system scripts.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/gameshler/archsetup/main/start.sh)
