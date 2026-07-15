@@ -25,6 +25,7 @@ readonly C_YELLOW=$'\e[33m'
 readonly C_RED=$'\e[31m'
 
 CURRENT_PHASE="startup"
+DESTRUCTIVE_STARTED=0   # flips to 1 once we begin writing to the disk (partition_disk)
 
 info()  { printf '%s==>%s %s\n'      "$C_BLUE$C_BOLD" "$C_RESET" "$*"; }
 ok()    { printf '%s  ✓%s %s\n'      "$C_GREEN"       "$C_RESET" "$*"; }
@@ -40,9 +41,12 @@ on_err() {
     [[ $exit_code -eq 0 ]] && return 0
     printf '\n%s##### install aborted (exit %s) during: %s #####%s\n' \
         "$C_RED$C_BOLD" "$exit_code" "$CURRENT_PHASE" "$C_RESET" >&2
-    cat >&2 <<'EOF'
+    # Only show teardown steps if we actually started writing to the disk.
+    # A failure before that (bad input, no network, missing tool) touched nothing.
+    if [[ "${DESTRUCTIVE_STARTED:-0}" == "1" ]]; then
+        cat >&2 <<'EOF'
 
-If disks were already touched, tear down the partial state before retrying:
+The disk was already being written to. Tear down the partial state before retrying:
 
     swapoff -a
     umount -R /mnt        2>/dev/null || true
@@ -51,6 +55,9 @@ If disks were already touched, tear down the partial state before retrying:
 
 Then re-run the installer.
 EOF
+    else
+        printf '\n%s\n' "Nothing was written to the disk. Fix the issue above and re-run." >&2
+    fi
 }
 trap on_err EXIT
 
@@ -128,6 +135,18 @@ prompt_required() {
     printf -v "$__var" '%s' "$reply"
 }
 
+# Prompt for a value that must match a regex (loops until it does).
+# prompt_matching VAR "Question" '^regex$' "hint shown on mismatch"
+prompt_matching() {
+    local __var="$1" question="$2" regex="$3" hint="$4" reply=""
+    while :; do
+        read -rp "$question: " reply || true
+        [[ "$reply" =~ $regex ]] && break
+        warn "$hint"
+    done
+    printf -v "$__var" '%s' "$reply"
+}
+
 # Prompt for a hidden password with confirmation (loops until they match).
 prompt_password() {
     local __var="$1" label="$2" p1="" p2=""
@@ -149,7 +168,16 @@ preflight() {
 
     [[ $EUID -eq 0 ]] || die "This script must run as root (from the Arch live ISO)."
     [[ -d /sys/firmware/efi ]] || die "Not booted in UEFI mode. Enable UEFI in firmware and re-boot the ISO."
-    command -v pacstrap >/dev/null 2>&1 || die "pacstrap not found — are you on the Arch live ISO?"
+
+    # Every tool the destructive phases call must exist now — a mid-partition
+    # "command not found" would leave the disk half-written. Fail here instead.
+    local tool missing=()
+    for tool in sgdisk cryptsetup mkfs.fat mkfs.ext4 mkswap wipefs partprobe \
+                udevadm blkid lsblk pvcreate vgcreate lvcreate vgs pvs \
+                genfstab pacstrap arch-chroot curl awk; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    (( ${#missing[@]} == 0 )) || die "Missing required tools: ${missing[*]}. Boot the official Arch ISO and re-run."
 
     info "Syncing clock (timedatectl set-ntp true)"
     timedatectl set-ntp true || warn "Could not enable NTP; continuing."
@@ -175,7 +203,10 @@ connect_wifi() {
     command -v iwctl >/dev/null 2>&1 || die "No network and iwctl unavailable."
 
     local wdev
-    wdev="$(iwctl device list 2>/dev/null | awk '/station/{print $2; exit}')"
+    # awk's early 'exit' can SIGPIPE iwctl (or iwctl exits non-zero with no
+    # adapter); pipefail would then abort here under set -e, before the wl*
+    # fallback below can run. Guard so an empty result just falls through.
+    wdev="$(iwctl device list 2>/dev/null | awk '/station/{print $2; exit}')" || wdev=""
     if [[ -z "$wdev" ]]; then
         local cand
         for cand in /sys/class/net/wl*; do
@@ -272,7 +303,13 @@ choose_timezone() {
     detected="$(detect_timezone || true)"
 
     if [[ -n "$detected" ]]; then
-        GEO_COUNTRY="$(curl -fsSL --max-time 5 https://ipapi.co/country 2>/dev/null | tr -d '[:space:]')"
+        # '|| GEO_COUNTRY=""' is required: curl -f exits non-zero on 429/5xx and,
+        # with pipefail, would fail this assignment and abort the installer under
+        # set -e (this endpoint is not wrapped like detect_timezone's).
+        GEO_COUNTRY="$(curl -fsSL --max-time 5 https://ipapi.co/country 2>/dev/null | tr -d '[:space:]')" || GEO_COUNTRY=""
+        # Geo-IP can return an HTML error body or rate-limit text; only a real
+        # 2-letter ISO code may reach 'reflector --country'.
+        [[ "$GEO_COUNTRY" =~ ^[A-Za-z][A-Za-z]$ ]] || GEO_COUNTRY=""
         read -rp "Timezone — detected '$detected'. Enter to accept, type another, or 's' to search: " reply || true
         reply="${reply:-$detected}"
     else
@@ -413,10 +450,19 @@ gather_input() {
     info "Available disks:"
     lsblk -dpno NAME,SIZE,MODEL | grep -vE 'loop|sr0' || true
     echo
+    local dtype
     while :; do
         prompt_required DISK "Target disk (e.g. /dev/vda or just vda)"
         [[ "$DISK" != /dev/* && -b "/dev/$DISK" ]] && DISK="/dev/$DISK"
-        [[ -b "$DISK" ]] && break
+        if [[ -b "$DISK" ]]; then
+            # Must be a whole disk, not a partition — otherwise sgdisk/wipefs
+            # would run against e.g. /dev/sda1 and part_name would build bogus
+            # child names. Allow loop devices so file-backed VM testing works.
+            dtype="$(lsblk -dnro TYPE "$DISK" 2>/dev/null | head -n1)" || dtype=""
+            [[ "$dtype" == "disk" || "$dtype" == "loop" ]] && break
+            warn "'$DISK' is a ${dtype:-non-disk device}, not a whole disk. Enter the whole disk (e.g. /dev/vda), not a partition."
+            continue
+        fi
         warn "'$DISK' is not a block device. Pick one from the list above."
     done
 
@@ -426,8 +472,14 @@ gather_input() {
     configure_layout
 
     echo
-    prompt_required HOSTNAME "Hostname"
-    prompt_required USERNAME "Username"
+    # Validate here, before anything destructive — a bad hostname/username would
+    # otherwise only fail deep inside the chroot (after pacstrap wiped the disk).
+    prompt_matching HOSTNAME "Hostname" \
+        '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$' \
+        "Hostname must be 1-63 chars: letters/digits/hyphens, no leading/trailing hyphen."
+    prompt_matching USERNAME "Username" \
+        '^[a-z_][a-z0-9_-]{0,31}$' \
+        "Username must start with a lowercase letter or _, then lowercase/digits/_/- (max 32)."
     echo
     prompt_password ROOT_PW "Root"
     prompt_password USER_PW "User ($USERNAME)"
@@ -520,7 +572,10 @@ teardown_existing() {
     # 2. deactivate VGs whose PV is a crypt device on this disk, then a VG that
     #    sits directly on a partition of this disk (LVM without LUKS).
     while read -r holder; do
-        vg="$(pvs --noheadings -o vg_name "$holder" 2>/dev/null | tr -d ' ')"
+        # pvs on a non-PV (an old EFI/NTFS partition on this disk) exits non-zero;
+        # with pipefail that would fail the assignment and abort teardown under
+        # set -e — the exact case a reinstall hits. Guard the whole substitution.
+        vg="$(pvs --noheadings -o vg_name "$holder" 2>/dev/null | tr -d ' ')" || vg=""
         [[ -n "$vg" ]] && vgchange -an "$vg" 2>/dev/null || true
     done < <(lsblk -pnro NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="crypt"||$2=="part"{print $1}')
 
@@ -536,6 +591,7 @@ teardown_existing() {
 
 partition_disk() {
     phase "Partition + encrypt"
+    DESTRUCTIVE_STARTED=1        # from here on, the disk is being rewritten
     teardown_existing
 
     info "Writing GPT layout to $DISK"
@@ -625,8 +681,19 @@ install_base() {
         local -a rfl=(--protocol https --sort rate --latest 20 --save /etc/pacman.d/mirrorlist)
         [[ -n "$GEO_COUNTRY" ]] && rfl=(--country "$GEO_COUNTRY" "${rfl[@]}")
         info "Ranking mirrors${GEO_COUNTRY:+ (country: $GEO_COUNTRY)}..."
-        reflector "${rfl[@]}" 2>/dev/null || warn "reflector failed; keeping default mirrorlist."
+        # reflector can exit 0 yet leave an empty list (over-narrow --country,
+        # transient mirror JSON). Back up first and roll back unless the result
+        # has real Server lines — otherwise pacstrap fails cryptically post-wipe.
+        cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.installsh.bak 2>/dev/null || true
+        if reflector "${rfl[@]}" 2>/dev/null && grep -q '^[[:space:]]*Server' /etc/pacman.d/mirrorlist; then
+            ok "Mirrorlist ranked."
+        else
+            warn "reflector failed or produced no mirrors; restoring the default mirrorlist."
+            cp -f /etc/pacman.d/mirrorlist.installsh.bak /etc/pacman.d/mirrorlist 2>/dev/null || true
+        fi
     fi
+    grep -q '^[[:space:]]*Server' /etc/pacman.d/mirrorlist \
+        || die "No usable pacman mirrors in /etc/pacman.d/mirrorlist — check the network and re-run."
 
     # mkinitcpio UKI package set (README.md:237), minus Secure Boot + base-devel.
     local -a pkgs=(
@@ -683,7 +750,9 @@ configure_system() {
     arch-chroot /mnt /usr/bin/env bash -euo pipefail <<'CHROOT'
 # --- timezone / clock ---
 ln -sf "/usr/share/zoneinfo/$CH_TZ" /etc/localtime
-hwclock --systohc
+# Non-fatal: a read-only/absent RTC (some VMs) must not abort a good install
+# post-pacstrap over a cosmetic clock write.
+hwclock --systohc || echo "warning: could not sync the hardware clock; continuing." >&2
 
 # --- locale: uncomment the exact entry whose first field == the canonical name
 #     (CH_LOCALE came from locale_canonical, so it matches /etc/locale.gen verbatim) ---
