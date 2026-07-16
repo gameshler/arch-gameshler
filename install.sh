@@ -521,7 +521,14 @@ confirm_wipe() {
     phase "Confirm disk wipe"
     local bare="${DISK##*/}"
 
-    printf '%s%s\n  EVERYTHING on %s will be ERASED.%s\n\n' "$C_YELLOW" "$C_BOLD" "$DISK" "$C_RESET"
+    # Show the device's identity (model + size), not just its path — a name match
+    # alone is too weak a gate before an irreversible wipe.
+    local model size
+    model="$(lsblk -dno MODEL "$DISK" 2>/dev/null | head -n1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    size="$(lsblk -dno SIZE  "$DISK" 2>/dev/null | head -n1)"
+
+    printf '%s%s\n  EVERYTHING on %s (%s%s) will be ERASED.%s\n\n' \
+        "$C_YELLOW" "$C_BOLD" "$DISK" "${size:-unknown size}" "${model:+, $model}" "$C_RESET"
     echo "  Planned layout:"
     printf '    %s   EFI System Partition   %s   (FAT32, /boot/efi)\n' "$PART_EFI" "$EFI_SIZE"
     printf '    %s   LUKS2 encrypted container (rest of disk)\n' "$PART_LUKS"
@@ -550,7 +557,7 @@ confirm_wipe() {
     read -rp "Type the disk name '$bare' to confirm: " reply || true
     reply="${reply//[[:space:]]/}"                       # ignore stray pasted whitespace
     [[ "$reply" == "$bare" ]] || die "Name mismatch ('$reply' vs '$bare') — nothing was written."
-    read -rp "Final check — type YES (uppercase) to ERASE $DISK: " reply || true
+    read -rp "Final check — type YES (uppercase) to ERASE $DISK (${size:-?}${model:+, $model}): " reply || true
     [[ "$reply" == "YES" ]] || die "Not confirmed — nothing was written."
     ok "Confirmed. Proceeding."
 }
@@ -659,6 +666,10 @@ setup_lvm() {
 
     info "Mounting target"
     mount "/dev/${VG_NAME}/root" /mnt
+    # Don't trust mount's exit code alone — prove /mnt is the LV we just created
+    # before anything gets pacstrapped onto it.
+    [[ "$(findmnt -no SOURCE /mnt 2>/dev/null)" == "/dev/mapper/${VG_NAME}-root" ]] \
+        || die "/mnt is not the freshly created root LV (/dev/mapper/${VG_NAME}-root) — refusing to continue."
     mkdir -p /mnt/boot/efi
     if [[ "$SEPARATE_HOME" == "yes" ]]; then
         mkdir -p /mnt/home
@@ -796,6 +807,10 @@ sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect microcode modconf kms keyboar
 
 # --- kernel cmdline: unlock LUKS by UUID, find root by filesystem UUID ---
 echo "rd.luks.name=${CH_LUKS_UUID}=cryptlvm root=UUID=${CH_ROOT_UUID} rootfstype=ext4 rw quiet bgrt_disable" > /etc/kernel/cmdline
+# Prove the cmdline carries the intended UUIDs before mkinitcpio bakes it into
+# the UKI — a wrong/empty UUID here produces a silently unbootable image.
+grep -q "$CH_LUKS_UUID" /etc/kernel/cmdline && grep -q "$CH_ROOT_UUID" /etc/kernel/cmdline \
+    || { echo "kernel cmdline is missing the expected LUKS/root UUID — aborting." >&2; exit 1; }
 
 # --- UKI presets for linux + linux-lts (single 'default' image, README form) ---
 cat > /etc/mkinitcpio.d/linux.preset <<'PRESET'
