@@ -521,14 +521,15 @@ confirm_wipe() {
     phase "Confirm disk wipe"
     local bare="${DISK##*/}"
 
-    # Show the device's identity (model + size), not just its path — a name match
-    # alone is too weak a gate before an irreversible wipe.
-    local model size
-    model="$(lsblk -dno MODEL "$DISK" 2>/dev/null | head -n1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    size="$(lsblk -dno SIZE  "$DISK" 2>/dev/null | head -n1)"
+    # Show the device's identity (model + size + serial), not just its path — a
+    # name match alone is too weak a gate before an irreversible wipe.
+    local model size serial
+    model="$(lsblk -dno MODEL  "$DISK" 2>/dev/null | head -n1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    size="$(lsblk -dno SIZE    "$DISK" 2>/dev/null | head -n1)"
+    serial="$(lsblk -dno SERIAL "$DISK" 2>/dev/null | head -n1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
-    printf '%s%s\n  EVERYTHING on %s (%s%s) will be ERASED.%s\n\n' \
-        "$C_YELLOW" "$C_BOLD" "$DISK" "${size:-unknown size}" "${model:+, $model}" "$C_RESET"
+    printf '%s%s\n  EVERYTHING on %s (%s%s%s) will be ERASED.%s\n\n' \
+        "$C_YELLOW" "$C_BOLD" "$DISK" "${size:-unknown size}" "${model:+, $model}" "${serial:+, S/N $serial}" "$C_RESET"
     echo "  Planned layout:"
     printf '    %s   EFI System Partition   %s   (FAT32, /boot/efi)\n' "$PART_EFI" "$EFI_SIZE"
     printf '    %s   LUKS2 encrypted container (rest of disk)\n' "$PART_LUKS"
@@ -797,13 +798,24 @@ useradd -m -G wheel "$CH_USER"
 # --- sudo for wheel via drop-in (never edit /etc/sudoers directly) ---
 echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel
 chmod 440 /etc/sudoers.d/10-wheel
+# A malformed drop-in, or a /etc/sudoers that doesn't include the dir, leaves a
+# system where the user can't escalate — validate both before handing off.
+visudo -cf /etc/sudoers.d/10-wheel >/dev/null \
+    || { echo "sudoers drop-in /etc/sudoers.d/10-wheel failed validation — aborting." >&2; exit 1; }
+grep -Eq '^[[:space:]]*@?includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers \
+    || { echo "/etc/sudoers does not include /etc/sudoers.d — wheel sudo would not apply; aborting." >&2; exit 1; }
 
 # --- services (fstrim only when not a server) ---
 systemctl enable NetworkManager
 [ "$CH_PROFILE" != "server" ] && systemctl enable fstrim.timer
 
 # --- mkinitcpio HOOKS: sd-encrypt before lvm2 before filesystems (Arch wiki) ---
+# sed only substitutes an existing uncommented HOOKS= line; if the file format
+# ever drifts (line commented/missing) the substitution is a silent no-op and
+# yields an unbootable initramfs, so assert the result rather than trust it.
 sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
+grep -Eq '^HOOKS=\(base systemd .*sd-encrypt.*lvm2.*filesystems' /etc/mkinitcpio.conf \
+    || { echo "mkinitcpio HOOKS line was not set as expected (unexpected mkinitcpio.conf format) — aborting." >&2; exit 1; }
 
 # --- kernel cmdline: unlock LUKS by UUID, find root by filesystem UUID ---
 echo "rd.luks.name=${CH_LUKS_UUID}=cryptlvm root=UUID=${CH_ROOT_UUID} rootfstype=ext4 rw quiet bgrt_disable" > /etc/kernel/cmdline
@@ -853,7 +865,15 @@ timeout         0
 console-mode    auto
 editor          no
 LOADER
-systemctl enable systemd-boot-update.service
+grep -q '^default[[:space:]]*arch-linux.efi' /boot/efi/loader/loader.conf \
+    || { echo "loader.conf was not written to the ESP with the expected default — aborting." >&2; exit 1; }
+# Only enable the auto-update service if the target actually ships the unit —
+# enabling a nonexistent unit would abort the run over a non-critical service.
+if [ -e /usr/lib/systemd/system/systemd-boot-update.service ]; then
+    systemctl enable systemd-boot-update.service
+else
+    echo "warning: systemd-boot-update.service not present in target; skipping enable." >&2
+fi
 CHROOT
 
     # Set passwords WITHOUT env/heredoc exposure: piped to chpasswd over stdin,
