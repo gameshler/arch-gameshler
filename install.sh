@@ -402,6 +402,9 @@ configure_layout() {
     echo "    2) Custom — pick swap and root sizes, and an optional separate /home"
     prompt_default mode "  Choice" "1"
 
+    # Intentional tradeoff: a fixed 1 GiB ESP. It comfortably holds both UKIs
+    # (linux + linux-lts, ~50-120 MiB each) with headroom to spare; a larger ESP
+    # is wasteful for the personal-workstation use case this installer targets.
     EFI_SIZE="$DEF_EFI_SIZE"
 
     # --- swap (both modes; 0 = none) ---
@@ -804,6 +807,12 @@ visudo -cf /etc/sudoers.d/10-wheel >/dev/null \
     || { echo "sudoers drop-in /etc/sudoers.d/10-wheel failed validation — aborting." >&2; exit 1; }
 grep -Eq '^[[:space:]]*@?includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers \
     || { echo "/etc/sudoers does not include /etc/sudoers.d — wheel sudo would not apply; aborting." >&2; exit 1; }
+# Definitive escalation test: parse the LIVE, fully-included sudoers via `sudo -l`
+# and confirm the user actually resolves to an all-commands policy. This is a
+# real parse (not a text heuristic) and catches a broken policy now, at install
+# time, instead of leaving the user to discover it post-boot.
+sudo -l -U "$CH_USER" 2>/dev/null | grep -Eq '\(ALL[^)]*\)[[:space:]]+ALL' \
+    || { echo "sudo policy does not grant '$CH_USER' admin rights (sudo -l parse failed) — aborting." >&2; exit 1; }
 
 # --- services (fstrim only when not a server) ---
 systemctl enable NetworkManager
@@ -849,6 +858,19 @@ mkinitcpio -P
 # Refuse to finish with a machine that has no bootable kernel image.
 for u in /boot/efi/EFI/Linux/arch-linux.efi /boot/efi/EFI/Linux/arch-linux-lts.efi; do
     [ -s "$u" ] || { echo "UKI $u was not produced by mkinitcpio — aborting." >&2; exit 1; }
+    # Beyond "the .efi exists": prove each UKI actually EMBEDS the intended kernel
+    # cmdline (both UUIDs) in its .cmdline PE section. objcopy ships with binutils
+    # (installed above). If the section can't be read (format drift), warn rather
+    # than abort a good install; a present-but-wrong cmdline is the real hazard.
+    emb="$(objcopy -O binary --only-section=.cmdline "$u" /dev/stdout 2>/dev/null | tr -d '\0')"
+    if [ -n "$emb" ]; then
+        case "$emb" in *"$CH_LUKS_UUID"*) ;; *)
+            echo "UKI $u does not embed the expected LUKS UUID in its cmdline — aborting." >&2; exit 1 ;; esac
+        case "$emb" in *"$CH_ROOT_UUID"*) ;; *)
+            echo "UKI $u does not embed the expected root UUID in its cmdline — aborting." >&2; exit 1 ;; esac
+    else
+        echo "warning: could not read the .cmdline section from $u; skipping embed check." >&2
+    fi
 done
 
 # --- systemd-boot: install to the ESP we chose; tolerate a chroot without
@@ -874,6 +896,16 @@ if [ -e /usr/lib/systemd/system/systemd-boot-update.service ]; then
 else
     echo "warning: systemd-boot-update.service not present in target; skipping enable." >&2
 fi
+
+# Post-install validation: confirm systemd-boot parses a real bootable entry for
+# our UKI from the ESP (reads the ESP; no EFI variables required). Informational
+# — bootctl can be terse in an offline chroot, so warn rather than abort; the
+# .cmdline embed check above is the deterministic gate.
+if bootctl --esp-path=/boot/efi list 2>/dev/null | grep -q 'arch-linux\.efi'; then
+    echo "bootctl: arch-linux.efi boot entry present on the ESP." >&2
+else
+    echo "warning: bootctl list did not report an arch-linux.efi entry; verify after first boot." >&2
+fi
 CHROOT
 
     # Set passwords WITHOUT env/heredoc exposure: piped to chpasswd over stdin,
@@ -884,11 +916,57 @@ CHROOT
     ok "System configured, UKIs generated, systemd-boot installed."
 }
 
+# Write a non-secret install record onto the target for later debugging: the
+# exact disk, layout, identity, and boot artifacts that produced this system.
+# Best-effort — never contains passwords, and a logging failure must not fail a
+# successful install.
+write_install_log() {
+    local logf="/mnt/var/log/archsetup-install.log" mirror_src
+    mkdir -p /mnt/var/log 2>/dev/null || return 0
+
+    if [[ -n "$GEO_COUNTRY" ]]; then
+        mirror_src="reflector --country $GEO_COUNTRY"
+    else
+        mirror_src="reflector (country undetected) or preserved default mirrorlist"
+    fi
+
+    {
+        echo   "# archsetup install.sh — install record (no secrets)"
+        echo   "timestamp:     $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        printf 'disk:          %s (size=%s model=%s serial=%s)\n' \
+            "$DISK" \
+            "$(lsblk -dno SIZE   "$DISK" 2>/dev/null | head -n1)" \
+            "$(lsblk -dno MODEL  "$DISK" 2>/dev/null | head -n1 | sed -e 's/^ *//' -e 's/ *$//')" \
+            "$(lsblk -dno SERIAL "$DISK" 2>/dev/null | head -n1 | sed -e 's/^ *//' -e 's/ *$//')"
+        echo   "efi_part:      $PART_EFI ($EFI_SIZE)"
+        echo   "luks_part:     $PART_LUKS"
+        echo   "vg_name:       $VG_NAME"
+        echo   "swap:          ${SWAP_SIZE:-none}"
+        echo   "root_size:     ${ROOT_SIZE:-rest of VG}"
+        echo   "separate_home: $SEPARATE_HOME"
+        echo   "profile:       $SYS_PROFILE"
+        echo   "microcode:     ${UCODE:-none}"
+        echo   "hostname:      $HOSTNAME"
+        echo   "username:      $USERNAME"
+        echo   "timezone:      $TIMEZONE"
+        echo   "locale:        $LOCALE"
+        echo   "keymap:        $KEYMAP"
+        echo   "mirror_src:    $mirror_src"
+        echo   "boot_uki:      $(for f in /mnt/boot/efi/EFI/Linux/*.efi; do [ -e "$f" ] && printf '%s ' "${f#/mnt}"; done)"
+        echo   "loader:        $([ -f /mnt/boot/efi/EFI/systemd/systemd-bootx64.efi ] && echo present || echo MISSING)"
+    } > "$logf" 2>/dev/null || return 0
+    chmod 600 "$logf" 2>/dev/null || true
+    ok "Install record written to /var/log/archsetup-install.log (on the new system)."
+}
+
 # ---------------------------------------------------------------------------
 # Phase 10 — finish
 # ---------------------------------------------------------------------------
 finish() {
     phase "Finishing up"
+
+    # Record what we built (while /mnt is still mounted) before tearing it down.
+    write_install_log
 
     # Scrub secrets from the environment.
     unset ROOT_PW USER_PW LUKS_PW
