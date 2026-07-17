@@ -70,7 +70,7 @@ trap on_err EXIT
 # ---------------------------------------------------------------------------
 readonly DEF_EFI_SIZE="1G"
 readonly DEF_TIMEZONE="Europe/London"
-readonly DEF_LOCALE="en_US.UTF-8"   # neutral default; fully overridable at the prompt
+readonly DEF_LOCALE="en_GB.UTF-8"   # matches README.md; fully overridable at the prompt
 readonly DEF_KEYMAP="us"
 
 # Populated by the prompt phase.
@@ -390,64 +390,45 @@ choose_keymap() {
     done
 }
 
-# Disk layout — beginner-friendly and small-disk-safe. Auto adapts to any disk;
-# Custom gives full control. Swap is optional in both modes.
+# Deterministic disk layout (no prompts, matches README's swap/root/home form):
+#   swap = total RAM capacity, root = 10% of the disk capped at 100 GiB,
+#   /home = the remaining space. The full layout is shown in the wipe
+#   confirmation before anything is written.
 configure_layout() {
-    local dsize sug_swap mode ans root_g
+    local dsize swap_g root_g
 
-    dsize="$(disk_gib "$DISK")"
-    sug_swap="$(ram_gib)"
-    (( sug_swap > 8 )) && sug_swap=8          # keep the suggestion small-disk friendly
-
-    echo
-    info "Disk: $DISK (~${dsize} GiB)"
-    echo "  How should the disk be laid out?"
-    echo "    1) Auto   — 1 GiB boot, optional swap, the rest for your system (recommended)"
-    echo "    2) Custom — pick swap and root sizes, and an optional separate /home"
-    prompt_default mode "  Choice" "1"
+    dsize="$(disk_gib "$DISK")"          # whole GiB (floored)
 
     # Intentional tradeoff: a fixed 1 GiB ESP. It comfortably holds both UKIs
     # (linux + linux-lts, ~50-120 MiB each) with headroom to spare; a larger ESP
     # is wasteful for the personal-workstation use case this installer targets.
     EFI_SIZE="$DEF_EFI_SIZE"
 
-    # --- swap (both modes; 0 = none) ---
+    # swap = total RAM capacity (whole GiB, rounded up) — enough for hibernation.
+    swap_g="$(ram_gib)"
+    if (( swap_g >= 1 )); then SWAP_SIZE="${swap_g}G"; else SWAP_SIZE=""; fi
+
+    # root = 10% of the disk, capped at 100 GiB (a 10 TB disk still gets 100 GiB).
+    root_g=$(( dsize / 10 ))
+    (( root_g > 100 )) && root_g=100
+    (( root_g < 1 ))   && root_g=1       # guard tiny / undetected disks
+    ROOT_SIZE="${root_g}G"
+
+    # /home takes whatever remains.
+    SEPARATE_HOME="yes"
+
     echo
-    echo "  Swap is disk space used as backup memory. Enter 0 to skip it."
-    while :; do
-        prompt_default ans "  Swap size in GiB (0 = none)" "$sug_swap"
-        [[ "$ans" =~ ^[0-9]+$ ]] || { warn "Enter a whole number of GiB."; continue; }
-        (( ans == 0 )) && SWAP_SIZE="" || SWAP_SIZE="${ans}G"
-        break
-    done
+    info "Disk: $DISK (~${dsize} GiB) — automatic layout:"
+    printf '    EFI   %s\n    swap  %s   (= RAM)\n    root  %s   (10%% of disk, capped at 100G)\n    home  rest of the disk\n' \
+        "$EFI_SIZE" "${SWAP_SIZE:-none}" "$ROOT_SIZE"
 
-    if [[ "$mode" == "2" ]]; then
-        prompt_default ans "  Separate /home partition? (y/N)" "N"
-        case "${ans,,}" in
-            y|yes) SEPARATE_HOME="yes" ;;
-            *)     SEPARATE_HOME="no" ;;
-        esac
-        if [[ "$SEPARATE_HOME" == "yes" ]]; then
-            while :; do
-                prompt_default root_g "  Root (/) size in GiB" "20"
-                [[ "$root_g" =~ ^[0-9]+$ ]] && (( root_g > 0 )) && { ROOT_SIZE="${root_g}G"; break; }
-                warn "Enter a whole number of GiB."
-            done
-            echo "  /home will use the remaining space."
-        else
-            ROOT_SIZE=""      # root takes the rest
-        fi
-    else
-        SEPARATE_HOME="no"
-        ROOT_SIZE=""          # root takes the rest
-    fi
-
-    # --- sanity: make sure the fixed pieces fit, leaving room for root ---
-    local swap_g="${SWAP_SIZE%G}"; swap_g="${swap_g:-0}"
-    local root_need="${ROOT_SIZE%G}"; root_need="${root_need:-0}"
-    local fixed=$(( 1 + swap_g + root_need ))     # EFI(1) + swap + any fixed root
+    # Fit check: EFI + swap + root must leave at least ~1 GiB for /home.
+    local fixed=$(( 1 + swap_g + root_g ))
     if (( dsize > 0 && fixed + 1 > dsize )); then
-        die "Requested layout (~${fixed} GiB) won't fit on a ~${dsize} GiB disk. Reduce swap/root and re-run."
+        die "Auto layout (EFI 1 + swap ${swap_g} + root ${root_g} = ${fixed} GiB) leaves no room for /home on a ~${dsize} GiB disk. Use a larger disk."
+    fi
+    if (( root_g < 15 )); then
+        warn "root is only ${root_g} GiB (10% of a small disk) — the base install fits but may fill quickly."
     fi
 }
 
