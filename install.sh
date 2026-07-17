@@ -818,21 +818,32 @@ echo "rd.luks.name=${CH_LUKS_UUID}=cryptlvm root=UUID=${CH_ROOT_UUID} rootfstype
 grep -q "$CH_LUKS_UUID" /etc/kernel/cmdline && grep -q "$CH_ROOT_UUID" /etc/kernel/cmdline \
     || { echo "kernel cmdline is missing the expected LUKS/root UUID — aborting." >&2; exit 1; }
 
-# --- UKI presets for linux + linux-lts (single 'default' image, README form) ---
+# --- UKI presets for linux + linux-lts (README form) ---
+# Each kernel builds TWO images: the normal 'default' UKI (autodetect-pruned,
+# small) and a 'fallback' UKI (-S autodetect => autodetect SKIPPED, so it packs
+# every module) as a recovery path if the pruned image can't find/mount root.
+# NOTE: the README lists fallback_uki/fallback_options but leaves
+# PRESETS=('default'), which means mkinitcpio would NEVER build the fallback.
+# We set PRESETS=('default' 'fallback') so the recovery image is actually
+# produced — a deliberate, correct divergence from the literal README.
 cat > /etc/mkinitcpio.d/linux.preset <<'PRESET'
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="/boot/vmlinuz-linux"
-PRESETS=('default')
+PRESETS=('default' 'fallback')
 default_uki="/boot/efi/EFI/Linux/arch-linux.efi"
 default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
+fallback_uki="/boot/efi/EFI/Linux/arch-linux-fallback.efi"
+fallback_options="-S autodetect"
 PRESET
 
 cat > /etc/mkinitcpio.d/linux-lts.preset <<'PRESET'
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="/boot/vmlinuz-linux-lts"
-PRESETS=('default')
+PRESETS=('default' 'fallback')
 default_uki="/boot/efi/EFI/Linux/arch-linux-lts.efi"
 default_options="--splash /usr/share/systemd/bootctl/splash-arch.bmp"
+fallback_uki="/boot/efi/EFI/Linux/arch-linux-lts-fallback.efi"
+fallback_options="-S autodetect"
 PRESET
 
 # --- build the UKIs into the ESP ---
@@ -840,8 +851,11 @@ mkdir -p /boot/efi/EFI/Linux
 mkinitcpio -P
 
 # Hard gate: mkinitcpio can print errors yet exit 0 on some preset mistakes.
-# Refuse to finish with a machine that has no bootable kernel image.
-for u in /boot/efi/EFI/Linux/arch-linux.efi /boot/efi/EFI/Linux/arch-linux-lts.efi; do
+# Refuse to finish with a machine that has no bootable kernel image. Both the
+# default AND the fallback UKI bake in the same /etc/kernel/cmdline, so the
+# embed check applies to all four images.
+for u in /boot/efi/EFI/Linux/arch-linux.efi          /boot/efi/EFI/Linux/arch-linux-fallback.efi \
+         /boot/efi/EFI/Linux/arch-linux-lts.efi      /boot/efi/EFI/Linux/arch-linux-lts-fallback.efi; do
     [ -s "$u" ] || { echo "UKI $u was not produced by mkinitcpio — aborting." >&2; exit 1; }
     # Beyond "the .efi exists": prove each UKI actually EMBEDS the intended kernel
     # cmdline (both UUIDs) in its .cmdline PE section. objcopy ships with binutils
