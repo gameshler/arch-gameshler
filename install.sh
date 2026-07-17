@@ -26,6 +26,7 @@ readonly C_RED=$'\e[31m'
 
 CURRENT_PHASE="startup"
 DESTRUCTIVE_STARTED=0   # flips to 1 once we begin writing to the disk (partition_disk)
+LOG=""                  # full-run transcript path (set in start_logging)
 
 info()  { printf '%s==>%s %s\n'      "$C_BLUE$C_BOLD" "$C_RESET" "$*"; }
 ok()    { printf '%s  ✓%s %s\n'      "$C_GREEN"       "$C_RESET" "$*"; }
@@ -41,6 +42,9 @@ on_err() {
     [[ $exit_code -eq 0 ]] && return 0
     printf '\n%s##### install aborted (exit %s) during: %s #####%s\n' \
         "$C_RED$C_BOLD" "$exit_code" "$CURRENT_PHASE" "$C_RESET" >&2
+    if [[ -n "${LOG:-}" ]]; then
+        printf 'Full transcript of this run (read before rebooting the ISO): %s\n' "$LOG" >&2
+    fi
     # Only show teardown steps if we actually started writing to the disk.
     # A failure before that (bad input, no network, missing tool) touched nothing.
     if [[ "${DESTRUCTIVE_STARTED:-0}" == "1" ]]; then
@@ -968,6 +972,13 @@ finish() {
     # Record what we built (while /mnt is still mounted) before tearing it down.
     write_install_log
 
+    # Copy the run transcript into the target — the ISO's copy is on tmpfs and
+    # vanishes on reboot; this keeps it on the installed system.
+    if [[ -n "$LOG" && -f "$LOG" ]]; then
+        mkdir -p /mnt/var/log 2>/dev/null || true
+        cp -f "$LOG" /mnt/var/log/ 2>/dev/null || true
+    fi
+
     # Scrub secrets from the environment.
     unset ROOT_PW USER_PW LUKS_PW
 
@@ -985,6 +996,9 @@ After you reboot and log in as '${USERNAME}', run the post-install setup:
     ${C_BOLD}bash <(curl -fsSL https://raw.githubusercontent.com/gameshler/archsetup/main/start.sh)${C_RESET}
 
 EOF
+    if [[ -n "$LOG" ]]; then
+        info "Install transcript saved on the new system: /var/log/$(basename "$LOG")"
+    fi
     local reply
     read -rp "Reboot now? [y/N]: " reply || true
     if [[ "${reply,,}" == "y" ]]; then
@@ -995,8 +1009,26 @@ EOF
     fi
 }
 
+# Tee the entire run (stdout+stderr) to a timestamped transcript so a fast-
+# scrolling — or failed — run can be read back afterwards. Colour is kept on the
+# terminal but stripped from the file so it stays greppable and pasteable. The
+# live ISO root is tmpfs (lost on reboot), so finish() copies this into the
+# target on success; on failure it stays on the ISO for you to read first.
+start_logging() {
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
+    LOG="/var/log/archsetup-install-${ts}.log"
+    if : > "$LOG" 2>/dev/null; then
+        exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >> "$LOG")) 2>&1
+        info "Full transcript of this run: $LOG"
+    else
+        LOG=""
+        warn "Could not open a transcript in /var/log; continuing without one."
+    fi
+}
+
 # ---------------------------------------------------------------------------
 main() {
+    start_logging
     preflight
     setup_network
     gather_input
