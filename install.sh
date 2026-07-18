@@ -14,6 +14,12 @@
 
 set -euo pipefail
 
+# start_logging keeps a tee pipe open on a high fd for the whole run; LVM tools
+# inherit it and print a benign "File descriptor N leaked on <cmd> invocation"
+# on every pvcreate/vgcreate/lvcreate. Silence that cosmetic noise — the fd is
+# our transcript pipe, not a real leak, and the LVM operations still succeed.
+export LVM_SUPPRESS_FD_WARNINGS=1
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -649,8 +655,11 @@ setup_lvm() {
         lvcreate -l 100%FREE     "$VG_NAME" -n root
     fi
 
-    mkfs.ext4 "/dev/${VG_NAME}/root"
-    [[ "$SEPARATE_HOME" == "yes" ]] && mkfs.ext4 "/dev/${VG_NAME}/home"
+    # -q: skip mke2fs's in-place progress counter. It redraws with backspaces
+    # (0x08) that are invisible on a tty but land as literal ^H in the file-
+    # backed transcript, since the log sanitizer only strips ANSI colour.
+    mkfs.ext4 -q "/dev/${VG_NAME}/root"
+    [[ "$SEPARATE_HOME" == "yes" ]] && mkfs.ext4 -q "/dev/${VG_NAME}/home"
     [[ -n "$SWAP_SIZE" ]] && mkswap "/dev/${VG_NAME}/swap"
 
     info "Mounting target"
