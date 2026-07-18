@@ -49,6 +49,26 @@ sect() { printf '\n%s== %s ==%s\n' "$C_BOLD$C_BLUE" "$1" "$C_RESET"; }
 assert() { if [[ "$2" == "0" ]]; then pass "$1"; else fail "$1" "${3:-}"; fi; }
 
 # ---------------------------------------------------------------------------
+# Tee the whole audit (stdout+stderr) to a timestamped transcript so a fast-
+# scrolling or partial run can be read back and diffed later — same idea as
+# install.sh's run transcript. Colour is kept on the terminal but stripped from
+# the file so it stays greppable and pasteable. This runs AFTER the sudo re-exec
+# above, so there is exactly one log, written as root into /var/log. Best-effort:
+# if /var/log isn't writable we fall back to $TMPDIR, then give up silently.
+LOG=""
+start_logging() {
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
+    local candidate="/var/log/archsetup-verify-${ts}.log"
+    if ! : > "$candidate" 2>/dev/null; then
+        candidate="${TMPDIR:-/tmp}/archsetup-verify-${ts}.log"
+        : > "$candidate" 2>/dev/null || return 0
+    fi
+    LOG="$candidate"
+    exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >> "$LOG")) 2>&1
+}
+start_logging
+
+# ---------------------------------------------------------------------------
 # Auto-detect the layout this system actually booted from.
 # ---------------------------------------------------------------------------
 REC="/var/log/archsetup-install.log"
@@ -68,6 +88,7 @@ USER_NAME="$(awk -F: '/^username:/{gsub(/[[:space:]]/,"",$2); print $2}' "$REC" 
 printf '%sinstall.sh verification — %s%s\n' "$C_BOLD" "$(date '+%Y-%m-%d %H:%M:%S')" "$C_RESET"
 printf 'Detected: disk=%s  efi=%s  luks=%s  vg=%s\n' "${DISK:-?}" "${EFI_PART:-?}" "${LUKS_PART:-?}" "$VG"
 printf '          profile=%s  user=%s\n' "${PROFILE:-unknown}" "${USER_NAME:-unknown}"
+[[ -n "$LOG" ]] && printf '          transcript=%s\n' "$LOG"
 
 # ---------------------------------------------------------------------------
 sect "A. Partitioning, encryption, LVM"
@@ -341,6 +362,7 @@ ls /var/log/archsetup-install-*.log >/dev/null 2>&1 \
 printf '\n%s================ SUMMARY ================%s\n' "$C_BOLD" "$C_RESET"
 printf '  %sPASS %3d%s    %sFAIL %3d%s    %sWARN %3d%s\n' \
     "$C_GREEN" "$P" "$C_RESET" "$C_RED" "$F" "$C_RESET" "$C_YELLOW" "$W" "$C_RESET"
+[[ -n "$LOG" ]] && printf '  transcript: %s\n' "$LOG"
 if [[ $F -eq 0 ]]; then
     printf '  %s%sAll checks passed. System matches the install.sh spec.%s\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
     exit 0
