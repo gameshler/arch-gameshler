@@ -142,7 +142,18 @@ for lv in root home swap; do
     fi
 done
 if lvs --noheadings -o lv_name "$VG" 2>/dev/null | tr -d ' ' | grep -qx swap; then
-    swapon --show=NAME --noheadings 2>/dev/null | grep -q "${VG}-swap\|/dev/mapper/${VG}-swap\|/dev/${VG}/swap" \
+    # Match by canonical device, not by name: the kernel reports an LVM swap in
+    # /proc/swaps (what `swapon --show` reads) as /dev/dm-N, while the LV lives at
+    # /dev/${VG}/swap -> /dev/mapper/${VG}-swap. readlink -f collapses all three to
+    # the same node so a genuinely-active swap isn't mis-flagged inactive.
+    swap_real="$(readlink -f "/dev/${VG}/swap" 2>/dev/null)"
+    swap_active=0
+    if [[ -n "$swap_real" ]]; then
+        while read -r n; do
+            [[ "$(readlink -f "$n" 2>/dev/null)" == "$swap_real" ]] && { swap_active=1; break; }
+        done < <(swapon --show=NAME --noheadings 2>/dev/null)
+    fi
+    [[ "$swap_active" == "1" ]] \
         && pass "swap is active" || fail "swap is active" "swap LV exists but swapon shows it inactive"
 fi
 
