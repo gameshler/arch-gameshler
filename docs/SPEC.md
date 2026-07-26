@@ -412,13 +412,6 @@ The bottom of the file (`core/tabs/common-script.sh:145`) unconditionally runs
 `check_package_manager "pacman"` and `check_init_manager …`, which is why
 sourcing it asserts an Arch/pacman host.
 
-**Known gap.** `apps/dwm/dwm-setup.sh:125` calls `enableService "$DM"`, but no
-`enableService` function is defined in the library or anywhere in the repo. Since
-`dwm-setup.sh` is `#!/bin/sh` without `-e`, the call fails as
-"command not found" and execution continues — so a freshly installed display
-manager is **not** enabled by that path. This is a latent bug, recorded here for
-accuracy (see also [§13](#13-future-compatibility)).
-
 ## 10. Configuration and dotfiles
 
 `files/` ships four dotfiles, consumed by exactly two task scripts:
@@ -482,16 +475,12 @@ from the README is reflected in the verifier's intended-divergence list.
 
 ## 13. Future compatibility
 
-Capabilities intentionally absent (or currently broken) today, listed so the spec
-doesn't imply them:
+Capabilities intentionally absent today, listed so the spec doesn't imply them:
 
 - **No CI / automated gate.** ShellCheck and `checkbashisms` are conventions, not
   enforced. A CI job running both across all `*.sh`, plus a VM smoke test of
   `install.sh` → `verify-install.sh`, would make
   [§11](#11-quality-requirements) enforceable.
-- **`enableService` is undefined** ([§9](#9-shared-library-common-scriptsh)).
-  Either add the helper to `common-script.sh` or replace the call in
-  `dwm-setup.sh` with the existing service pattern.
 - **No metadata catalog.** Descriptions, task-effect flags, preconditions, and
   multi-select all live (if at all) inside scripts. A future manifest could
   surface them in the menu without changing the script model.
