@@ -33,6 +33,11 @@ readonly C_RED=$'\e[31m'
 CURRENT_PHASE="startup"
 DESTRUCTIVE_STARTED=0   # flips to 1 once we begin writing to the disk (partition_disk)
 LOG=""                  # full-run transcript path (set in start_logging)
+LOG_FIFO=""             # named pipe feeding the transcript writer
+LOG_PID=""              # PID of the transcript writer, so stop_logging can wait on it
+LOG_HOLD=""             # read-write fd keeping the pipe open, so writes never block
+ORIG_OUT=""             # saved terminal fds, restored by stop_logging to seal the pipe
+ORIG_ERR=""
 
 info()  { printf '%s==>%s %s\n'      "$C_BLUE$C_BOLD" "$C_RESET" "$*"; }
 ok()    { printf '%s  ✓%s %s\n'      "$C_GREEN"       "$C_RESET" "$*"; }
@@ -45,6 +50,8 @@ phase() { CURRENT_PHASE="$1"; printf '\n%s########## %s %s\n' "$C_BOLD" "$1" "$C
 # partial LUKS/LVM state can be torn down before retrying.
 on_err() {
     local exit_code=$?
+    # The FIFO itself is disposable; the transcript file it fed is what matters.
+    [[ -n "${LOG_FIFO:-}" ]] && rm -f "$LOG_FIFO" 2>/dev/null
     [[ $exit_code -eq 0 ]] && return 0
     printf '\n%s##### install aborted (exit %s) during: %s #####%s\n' \
         "$C_RED$C_BOLD" "$exit_code" "$CURRENT_PHASE" "$C_RESET" >&2
@@ -979,21 +986,11 @@ finish() {
     # Record what we built (while /mnt is still mounted) before tearing it down.
     write_install_log
 
-    # Copy the run transcript into the target — the ISO's copy is on tmpfs and
-    # vanishes on reboot; this keeps it on the installed system.
-    if [[ -n "$LOG" && -f "$LOG" ]]; then
-        mkdir -p /mnt/var/log 2>/dev/null || true
-        cp -f "$LOG" /mnt/var/log/ 2>/dev/null || true
-    fi
-
     # Scrub secrets from the environment.
     unset ROOT_PW USER_PW LUKS_PW
 
-    info "Unmounting"
-    swapoff -a 2>/dev/null || true
-    umount -R /mnt 2>/dev/null || true
-
-    trap - EXIT
+    # Print the hand-off BEFORE sealing the transcript, so the copy on the target
+    # ends with the completion banner rather than stopping mid-teardown.
     cat <<EOF
 
 ${C_GREEN}${C_BOLD}Base install complete.${C_RESET}
@@ -1003,8 +1000,32 @@ After you reboot and log in as '${USERNAME}', run the post-install setup:
     ${C_BOLD}bash <(curl -fsSL https://raw.githubusercontent.com/gameshler/archsetup/main/start.sh)${C_RESET}
 
 EOF
+
+    # Copy the run transcript into the target — the ISO's copy is on tmpfs and
+    # vanishes on reboot; this keeps it on the installed system. stop_logging must
+    # come first or the copy is a truncated snapshot of a still-open tee pipe.
+    local saved=""
     if [[ -n "$LOG" ]]; then
-        info "Install transcript saved on the new system: /var/log/$(basename "$LOG")"
+        stop_logging
+        if [[ -f "$LOG" ]] && mkdir -p /mnt/var/log 2>/dev/null \
+           && cp -f "$LOG" /mnt/var/log/ 2>/dev/null; then
+            # Match the install record's 600: the transcript carries the same
+            # non-secret identity data (disk serial, hostname, username) and has
+            # no reason to be world-readable on the installed system.
+            chmod 600 "/mnt/var/log/$(basename "$LOG")" 2>/dev/null || true
+            saved="/var/log/$(basename "$LOG")"
+        fi
+    fi
+
+    info "Unmounting"
+    swapoff -a 2>/dev/null || true
+    umount -R /mnt 2>/dev/null || true
+
+    trap - EXIT
+    if [[ -n "$saved" ]]; then
+        info "Install transcript saved on the new system: $saved"
+    elif [[ -n "$LOG" ]]; then
+        warn "Could not copy the transcript onto the target; it stays at $LOG on this ISO (lost on reboot)."
     fi
     local reply
     read -rp "Reboot now? [y/N]: " reply || true
@@ -1024,13 +1045,48 @@ EOF
 start_logging() {
     local ts; ts="$(date +%Y%m%d-%H%M%S)"
     LOG="/var/log/archsetup-install-${ts}.log"
-    if : > "$LOG" 2>/dev/null; then
-        exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >> "$LOG")) 2>&1
-        info "Full transcript of this run: $LOG"
-    else
+    if ! : > "$LOG" 2>/dev/null; then
         LOG=""
         warn "Could not open a transcript in /var/log; continuing without one."
+        return 0
     fi
+
+    LOG_FIFO="$(mktemp -u /tmp/archsetup-log.XXXXXX)"
+    if ! mkfifo -m 600 "$LOG_FIFO" 2>/dev/null; then
+        LOG="" LOG_FIFO=""
+        warn "Could not create the transcript pipe; continuing without a transcript."
+        return 0
+    fi
+
+    exec {ORIG_OUT}>&1 {ORIG_ERR}>&2
+    # A real background job, deliberately NOT a process substitution: bash cannot
+    # `wait` on a process substitution (bare `wait` returns immediately and leaves
+    # it draining), so finish() would copy a half-written file. With a named pipe
+    # and a job PID, stop_logging waits for a definite EOF-and-exit.
+    { tee "/dev/fd/$ORIG_OUT" < "$LOG_FIFO" \
+        | sed -u 's/\x1b\[[0-9;]*m//g' >> "$LOG"; } &
+    LOG_PID=$!
+    # Hold the pipe open read-write before redirecting: without a reader present,
+    # `exec 1>fifo` blocks forever, which would hang the installer at startup if
+    # the writer job ever failed to come up.
+    exec {LOG_HOLD}<>"$LOG_FIFO"
+    exec 1>"$LOG_FIFO" 2>&1
+    info "Full transcript of this run: $LOG"
+}
+
+# Seal the transcript: restore the terminal fds (dropping our last references to
+# the pipe's write end, so the writer sees EOF) and wait for the writer to exit.
+# Only after this is $LOG complete and safe to copy.
+stop_logging() {
+    [[ -n "$LOG_PID" ]] || return 0
+    # The leading 1 is required: bare `>&word` is bash's `&>word` shorthand
+    # (redirect both streams to a *file*) unless the fd number is explicit.
+    exec 1>&"$ORIG_OUT" 2>&"$ORIG_ERR"
+    exec {ORIG_OUT}>&- {ORIG_ERR}>&- {LOG_HOLD}>&-
+    wait "$LOG_PID" 2>/dev/null || true
+    ORIG_OUT="" ORIG_ERR="" LOG_PID=""
+    rm -f "$LOG_FIFO" 2>/dev/null || true
+    LOG_FIFO=""
 }
 
 # ---------------------------------------------------------------------------
