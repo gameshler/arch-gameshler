@@ -147,8 +147,12 @@ update_fstab() {
     local pass=2
     [[ "$FSTYPE" == xfs || "$FSTYPE" == btrfs ]] && pass=0
 
-    msg "Backing up /etc/fstab and adding the entry..."
-    sudo cp /etc/fstab /etc/fstab.bak
+    # Timestamped backup: a fixed .bak is overwritten on the second run, so the
+    # "backup" would already contain the first run's edit and lose the original.
+    local backup
+    backup="/etc/fstab.bak.$(date +%Y%m%d-%H%M%S)"
+    msg "Backing up /etc/fstab to $backup and adding the entry..."
+    sudo cp /etc/fstab "$backup"
     printf '# %s -> %s (%s)\nUUID=%s %s %s defaults,nofail 0 %s\n' \
         "/dev/$NAME" "$mount_point" "${LABEL:-no-label}" \
         "$UUID" "$mount_point" "$FSTYPE" "$pass" | sudo tee -a /etc/fstab >/dev/null
