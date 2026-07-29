@@ -159,7 +159,10 @@ update_fstab() {
 
 mount_drive() {
     msg "Mounting $partition at $mount_point..."
-    sudo mount "$mount_point"
+    # `|| true`: under `set -e` a failing mount would abort here, so the die()
+    # below (and its "the fstab entry was kept" hint) would never be reached.
+    # Let it fail, then report through the findmnt check.
+    sudo mount "$mount_point" || true
     if findmnt -no TARGET "$mount_point" >/dev/null 2>&1; then
         msg "Drive mounted successfully at $mount_point."
     else
