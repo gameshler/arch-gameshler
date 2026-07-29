@@ -86,6 +86,20 @@ readonly DEF_TIMEZONE="Europe/London"
 readonly DEF_LOCALE="en_GB.UTF-8"   # matches README.md; fully overridable at the prompt
 readonly DEF_KEYMAP="us"
 
+# Base package set (README.md:237), minus Secure Boot + base-devel. Declared here
+# rather than inline in install_base so write_install_log can record the exact set
+# this run installed — verify-install.sh audits against the recorded list instead
+# of maintaining a second copy that silently drifts when a package is added here.
+readonly -a BASE_PKGS=(
+    base linux linux-firmware linux-lts
+    lvm2 vim sudo git networkmanager
+    efibootmgr ntfs-3g binutils systemd-ukify
+)
+
+# The mkinitcpio HOOKS line. Same reasoning as BASE_PKGS: single source of truth,
+# crossed into the chroot as CH_HOOKS and recorded for the verifier to read back.
+readonly MKINITCPIO_HOOKS="base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck"
+
 # Populated by the prompt phase.
 DISK=""
 PART_EFI=""
@@ -711,12 +725,7 @@ install_base() {
     grep -q '^[[:space:]]*Server' /etc/pacman.d/mirrorlist \
         || die "No usable pacman mirrors in /etc/pacman.d/mirrorlist — check the network and re-run."
 
-    # mkinitcpio UKI package set (README.md:237), minus Secure Boot + base-devel.
-    local -a pkgs=(
-        base linux linux-firmware linux-lts
-        lvm2 vim sudo git networkmanager
-        efibootmgr ntfs-3g binutils systemd-ukify
-    )
+    local -a pkgs=("${BASE_PKGS[@]}")
     [[ -n "$UCODE" ]] && pkgs+=("$UCODE")
 
     info "pacstrap: ${pkgs[*]}"
@@ -761,7 +770,8 @@ configure_system() {
     # afterwards via a stdin pipe, so they never touch env, disk, or logs.
     export CH_TZ="$TIMEZONE" CH_LOCALE="$LOCALE" CH_KEYMAP="$KEYMAP" \
            CH_HOST="$HOSTNAME" CH_USER="$USERNAME" CH_PROFILE="$SYS_PROFILE" \
-           CH_LUKS_UUID="$luks_uuid" CH_ROOT_UUID="$root_uuid"
+           CH_LUKS_UUID="$luks_uuid" CH_ROOT_UUID="$root_uuid" \
+           CH_HOOKS="$MKINITCPIO_HOOKS"
 
     arch-chroot /mnt /usr/bin/env bash -euo pipefail <<'CHROOT'
 # --- timezone / clock ---
@@ -823,9 +833,13 @@ systemctl enable NetworkManager
 # sed only substitutes an existing uncommented HOOKS= line; if the file format
 # ever drifts (line commented/missing) the substitution is a silent no-op and
 # yields an unbootable initramfs, so assert the result rather than trust it.
-sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
-grep -Eq '^HOOKS=\(base systemd .*sd-encrypt.*lvm2.*filesystems' /etc/mkinitcpio.conf \
+sed -i "s|^HOOKS=.*|HOOKS=($CH_HOOKS)|" /etc/mkinitcpio.conf
+grep -qxF "HOOKS=($CH_HOOKS)" /etc/mkinitcpio.conf \
     || { echo "mkinitcpio HOOKS line was not set as expected (unexpected mkinitcpio.conf format) — aborting." >&2; exit 1; }
+# Guard the constant itself, not just that it was written: a reordering that puts
+# lvm2 before sd-encrypt still writes cleanly but yields an unbootable initramfs.
+grep -Eq '^HOOKS=\(base systemd .*sd-encrypt.*lvm2.*filesystems' /etc/mkinitcpio.conf \
+    || { echo "mkinitcpio HOOKS order is wrong (need sd-encrypt before lvm2 before filesystems) — aborting." >&2; exit 1; }
 
 # --- kernel cmdline: unlock LUKS by UUID, find root by filesystem UUID ---
 echo "rd.luks.name=${CH_LUKS_UUID}=cryptlvm root=UUID=${CH_ROOT_UUID} rootfstype=ext4 rw quiet bgrt_disable" > /etc/kernel/cmdline
@@ -970,6 +984,10 @@ write_install_log() {
         echo   "locale:        $LOCALE"
         echo   "keymap:        $KEYMAP"
         echo   "mirror_src:    $mirror_src"
+        # Read back by verify-install.sh so the audit follows this installer
+        # instead of keeping its own copy of the same two lists.
+        echo   "packages:      ${BASE_PKGS[*]}"
+        echo   "hooks:         $MKINITCPIO_HOOKS"
         echo   "boot_uki:      $(for f in /mnt/boot/efi/EFI/Linux/*.efi; do [ -e "$f" ] && printf '%s ' "${f#/mnt}"; done)"
         echo   "loader:        $([ -f /mnt/boot/efi/EFI/systemd/systemd-bootx64.efi ] && echo present || echo MISSING)"
     } > "$logf" 2>/dev/null || return 0

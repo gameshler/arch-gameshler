@@ -83,6 +83,28 @@ start_logging
 # ---------------------------------------------------------------------------
 REC="/var/log/archsetup-install.log"
 
+# rec <key> [fallback] — read a field from the install record.
+#
+# The record is written by the very install.sh that built this system, so
+# preferring it keeps the two scripts from drifting: add a package or reorder
+# HOOKS in install.sh and this audit follows automatically instead of checking a
+# stale second copy. The fallback is what install.sh used when this verifier was
+# written, so a system installed before the record carried that field still gets
+# audited rather than skipped.
+#
+# Stable identifiers (cryptlvm, the EFI partition label, arch-linux.efi) are
+# deliberately NOT read from the record: they are contract, and if one ever
+# changes, this audit *should* fail loudly rather than quietly follow along.
+rec() {
+    local key="$1" val=""
+    if [[ -r "$REC" ]]; then
+        val="$(awk -v k="$key" 'index($0, k ":") == 1 {
+                   sub(/^[^:]*:[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit }' \
+               "$REC" 2>/dev/null)"
+    fi
+    printf '%s' "${val:-${2:-}}"
+}
+
 EFI_PART="$(findmnt -no SOURCE /boot/efi 2>/dev/null || true)"
 ROOT_SRC="$(findmnt -no SOURCE / 2>/dev/null || true)"
 VG="$(lvs --noheadings -o vg_name,lv_name 2>/dev/null | awk '$2=="root"{print $1; exit}' | tr -d ' ')"
@@ -91,9 +113,14 @@ LUKS_PART="$(cryptsetup status cryptlvm 2>/dev/null | awk '/device:/{print $2}')
 DISK="$(lsblk -no PKNAME "$EFI_PART" 2>/dev/null | head -n1)"
 [[ -n "$DISK" ]] && DISK="/dev/$DISK"
 
-PROFILE="$(awk -F: '/^profile:/{gsub(/[[:space:]]/,"",$2); print $2}' "$REC" 2>/dev/null || true)"
-USER_NAME="$(awk -F: '/^username:/{gsub(/[[:space:]]/,"",$2); print $2}' "$REC" 2>/dev/null || true)"
+PROFILE="$(rec profile)"
+USER_NAME="$(rec username)"
 [[ -z "$USER_NAME" ]] && USER_NAME="$(awk -F: '$3>=1000 && $3<65534 && $1!="nobody"{print $1; exit}' /etc/passwd)"
+
+# Expectations that install.sh owns. Fallbacks match install.sh at the time of
+# writing; a present record overrides them. See rec() above.
+EXPECT_PKGS="$(rec packages 'base linux linux-firmware linux-lts lvm2 vim sudo git networkmanager efibootmgr ntfs-3g binutils systemd-ukify')"
+EXPECT_HOOKS="$(rec hooks 'base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck')"
 
 printf '%sinstall.sh verification — %s%s\n' "$C_BOLD" "$(date '+%Y-%m-%d %H:%M:%S')" "$C_RESET"
 printf 'Detected: disk=%s  efi=%s  luks=%s  vg=%s\n' "${DISK:-?}" "${EFI_PART:-?}" "${LUKS_PART:-?}" "$VG"
@@ -192,8 +219,7 @@ fi
 # ---------------------------------------------------------------------------
 sect "C. Base packages"
 
-for p in base linux linux-firmware linux-lts lvm2 vim sudo git networkmanager \
-         efibootmgr ntfs-3g binutils systemd-ukify; do
+for p in $EXPECT_PKGS; do
     pacman -Qq "$p" >/dev/null 2>&1 && pass "package $p" || fail "package $p installed"
 done
 vendor="$(awk -F': ' '/vendor_id/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
@@ -294,10 +320,14 @@ fi
 # ---------------------------------------------------------------------------
 sect "G. Boot chain (mkinitcpio UKI + systemd-boot)"
 
-HOOKS_RE='^HOOKS=\(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck\)'
-grep -qE "$HOOKS_RE" /etc/mkinitcpio.conf 2>/dev/null \
-    && pass "HOOKS line matches expected order (base…sd-encrypt lvm2 filesystems fsck)" \
+grep -qxF "HOOKS=($EXPECT_HOOKS)" /etc/mkinitcpio.conf 2>/dev/null \
+    && pass "HOOKS line matches the installer's ($EXPECT_HOOKS)" \
     || fail "HOOKS line" "got: $(grep '^HOOKS=' /etc/mkinitcpio.conf 2>/dev/null)"
+# Independent of what was recorded: this ordering is what makes the initramfs
+# bootable, so assert it even if the record says something else.
+grep -qE '^HOOKS=\(base systemd .*sd-encrypt.*lvm2.*filesystems' /etc/mkinitcpio.conf 2>/dev/null \
+    && pass "HOOKS order: sd-encrypt before lvm2 before filesystems" \
+    || fail "HOOKS order (sd-encrypt → lvm2 → filesystems)"
 
 CMDLINE_FILE=/etc/kernel/cmdline
 cml="$(cat "$CMDLINE_FILE" 2>/dev/null)"
