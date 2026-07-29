@@ -23,6 +23,7 @@
 #   - HOOKS prepends `base` (superset of the README line)
 #   - cmdline uses root=UUID=<fs-uuid> instead of root=/dev/vg/root
 #   - PRESETS=('default' 'fallback') so the fallback UKIs actually build
+#   - loader.conf timeout is non-zero so those fallback UKIs are selectable
 #   - sudo via /etc/sudoers.d/10-wheel drop-in, never editing /etc/sudoers
 #   - fstrim.timer + LUKS discards only on the desktop profile
 
@@ -347,7 +348,10 @@ done
 LC=/boot/efi/loader/loader.conf
 if [[ -r "$LC" ]]; then
     grep -qE '^default[[:space:]]+arch-linux\.efi' "$LC" && pass "loader.conf default = arch-linux.efi" || fail "loader.conf default arch-linux.efi"
-    grep -qE '^timeout[[:space:]]+0'                "$LC" && pass "loader.conf timeout 0"                || warn "loader.conf timeout 0"
+    _tmo="$(awk '/^timeout[[:space:]]/{print $2; exit}' "$LC" 2>/dev/null)"
+    [[ -n "$_tmo" && "$_tmo" != "0" ]] \
+        && pass "loader.conf timeout=$_tmo (menu reachable, fallback UKI selectable)" \
+        || warn "loader.conf timeout" "got '${_tmo:-unset}' — with timeout 0 the fallback UKI is only reachable by holding Space"
     grep -qE '^editor[[:space:]]+no'                "$LC" && pass "loader.conf editor no"                || warn "loader.conf editor no"
 else
     fail "loader.conf present on the ESP"

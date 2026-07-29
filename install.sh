@@ -889,9 +889,12 @@ if ! bootctl --esp-path=/boot/efi install; then
 fi
 [ -f /boot/efi/EFI/systemd/systemd-bootx64.efi ] \
     || { echo "systemd-boot loader was not installed to the ESP — aborting." >&2; exit 1; }
+# A non-zero timeout is deliberate: mkinitcpio builds fallback UKIs for both
+# linux and linux-lts, and with `timeout 0` the menu is only reachable by holding
+# Space at boot — so those recovery entries are unusable exactly when they're needed.
 cat > /boot/efi/loader/loader.conf <<LOADER
 default         arch-linux.efi
-timeout         0
+timeout         3
 console-mode    auto
 editor          no
 LOADER
