@@ -73,6 +73,22 @@ hostname, user, passwords, timezone/locale/keymap). Secure Boot stays manual (se
 bash <(curl -fsSL https://raw.githubusercontent.com/gameshler/archsetup/main/install.sh)
 ```
 
+**Verify the base install (after the first reboot, before anything else):** a
+read-only PASS/FAIL audit of everything `install.sh` built — partition/LUKS/LVM
+layout, filesystems and fstab hardening, base packages, localization, user and
+sudo policy, services, and the whole mkinitcpio-UKI + systemd-boot chain. It never
+writes, mounts, or formats anything, and exits non-zero if any check FAILs.
+
+Save it rather than piping it, so it can re-exec itself under `sudo` for the
+privileged checks (`luksDump`, `blkid` on raw partitions, `/etc/sudoers.d`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gameshler/archsetup/main/verify-install.sh -o verify-install.sh
+sudo bash verify-install.sh
+```
+
+Run any other way it still works, but the privileged checks degrade to WARN.
+
 **Post-install setup (after first boot):** firewall, dotfiles, dwm, and system scripts.
 
 ```bash
