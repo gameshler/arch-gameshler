@@ -30,10 +30,19 @@
 set -uo pipefail   # NOT -e: we want every check to run even after a failure.
 
 # Re-exec under sudo so privileged reads (luksDump, blkid on raw parts, sudoers.d)
-# work. Skip if already root or if sudo is unavailable (checks degrade to WARN).
+# work. Only when $0 is a real file sudo can reopen: under the documented
+# `bash <(curl …)` form $0 is /dev/fd/N — an fd of *this* shell, which the sudo
+# child cannot reopen — and under `curl … | bash` it is plain "bash", where the
+# re-exec would drop the user into an interactive root shell instead of running
+# the audit. In both cases fall through and let the privileged checks WARN.
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    if command -v sudo >/dev/null 2>&1; then exec sudo -- "$0" "$@"; fi
-    printf 'Not running as root and sudo not found; privileged checks will WARN.\n\n' >&2
+    if [[ -f "$0" && -r "$0" ]] && command -v sudo >/dev/null 2>&1; then
+        exec sudo -- "$0" "$@"
+    fi
+    printf 'Not running as root; privileged checks will WARN rather than verify.\n' >&2
+    printf 'For a complete audit, save the script and run it as root:\n' >&2
+    printf '    curl -fsSL https://raw.githubusercontent.com/gameshler/archsetup/main/verify-install.sh -o verify-install.sh\n' >&2
+    printf '    sudo bash verify-install.sh\n\n' >&2
 fi
 
 # ---------------------------------------------------------------------------
