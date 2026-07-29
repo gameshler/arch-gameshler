@@ -121,9 +121,20 @@ get_uuid_fstype() {
     [[ -n "$FSTYPE" ]] || die "Could not determine the filesystem type of $partition."
 }
 
-create_mount_point() {
+# Prompt for and fully validate the mount point BEFORE anything destructive runs.
+# The /etc/fstab collision check lives here rather than in update_fstab: formatting
+# first and only then discovering the path is taken would leave a wiped drive and
+# no entry. Nothing here touches the device.
+choose_mount_point() {
     read -rp "Enter the mount point path (e.g., /mnt/data): " mount_point || true
     [[ "$mount_point" == /* ]] || die "Mount point must be an absolute path."
+    if awk -v mp="$mount_point" '$1 !~ /^#/ && $2 == mp {found=1} END{exit !found}' /etc/fstab 2>/dev/null; then
+        die "$mount_point is already a mount point in /etc/fstab. Choose a different path."
+    fi
+}
+
+# Create the directory. Runs after formatting; purely local and non-destructive.
+create_mount_point() {
     if [[ ! -d "$mount_point" ]]; then
         msg "Creating mount point $mount_point..."
         sudo mkdir -p "$mount_point"
@@ -133,15 +144,15 @@ create_mount_point() {
 }
 
 # Append a UUID-based entry with `nofail` so a missing/failed secondary drive
-# cannot block boot. Idempotent: skips if the UUID or mount point is already listed.
+# cannot block boot. Idempotent: skips if the UUID is already listed. (The mount
+# point was checked in choose_mount_point, before the format.)
 update_fstab() {
     if grep -qsE "UUID=${UUID}[[:space:]]" /etc/fstab; then
         msg "An /etc/fstab entry for UUID=$UUID already exists — leaving it untouched."
         return 0
     fi
-    if awk -v mp="$mount_point" '$1 !~ /^#/ && $2 == mp {found=1} END{exit !found}' /etc/fstab; then
-        die "$mount_point is already a mount point in /etc/fstab. Choose a different path."
-    fi
+    # NOTE: the mount-point collision check ran in choose_mount_point, before the
+    # format. Only the UUID check belongs here — the UUID isn't known until after.
 
     # xfs/btrfs are not fsck'd at boot -> pass 0; ext-family -> pass 2.
     local pass=2
@@ -178,6 +189,7 @@ main() {
     UUID="" FSTYPE="" LABEL="" NAME="" partition="" mount_point=""
     require_tools
     select_drive
+    choose_mount_point
     maybe_format
     get_uuid_fstype
     create_mount_point
