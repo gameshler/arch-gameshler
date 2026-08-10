@@ -111,43 +111,43 @@ verify-install.sh (optional audit)                           ├── core/tabs
 
 Stage 1 and Stage 2 share no runtime state. Stage 2 discovers what Stage 1 built
 only through the installed system itself (and, for the verifier, the non-secret
-install record at `/var/log/archsetup-install.log`, `install.sh:931`).
+install record at `/var/log/archsetup-install.log`, `install.sh:962`).
 
-### 4.3 Stage-1 install flow (`install.sh:1034` `main`)
+### 4.3 Stage-1 install flow (`install.sh:1118` `main`)
 
 Ordered phases, each gated so a failure aborts before the next:
 
 1. `start_logging` — tee the whole run to `/var/log/archsetup-install-<ts>.log`,
-   ANSI stripped from the file (`install.sh:1021`).
+   ANSI stripped from the file (`install.sh:1092`).
 2. `preflight` — assert root + UEFI, assert every destructive-phase tool exists,
-   sync the clock (`install.sh:176`).
+   sync the clock (`install.sh:218`).
 3. `setup_network` — auto-detect a wired carrier, else fall back to `iwctl` Wi-Fi;
-   verify real route + DNS reachability (`install.sh:250`).
+   verify real route + DNS reachability (`install.sh:285`).
 4. `gather_input` — the only interactive phase: disk, deterministic layout,
    hostname/username (regex-validated), passwords, timezone/locale/keymap (with
-   search helpers), profile, microcode auto-detect (`install.sh:441`).
+   search helpers), profile, microcode auto-detect (`install.sh:467`).
 5. `confirm_wipe` — show disk identity (model+size+serial) and planned layout;
    require typing the bare disk name **and** `YES`; refuse a disk with mounted
-   partitions (`install.sh:514`).
+   partitions (`install.sh:540`).
 6. `partition_disk` — sets `DESTRUCTIVE_STARTED=1`, tears down prior LUKS/LVM on
    the target disk only, writes GPT (ESP + LUKS), formats ESP, LUKS2-formats and
-   opens `cryptlvm` (`install.sh:594`).
+   opens `cryptlvm` (`install.sh:620`).
 7. `setup_lvm` — collision-free VG name, create PV/VG/LVs, mkfs, mount `/mnt`,
    and *prove* `/mnt` is the freshly created root LV before continuing
-   (`install.sh:635`).
+   (`install.sh:661`).
 8. `install_base` — rank mirrors (reflector, with rollback on empty result),
    pacstrap the base set, `genfstab -U`, harden the ESP vfat line
-   (`fmask=0137,dmask=0027`) (`install.sh:686`).
+   (`fmask=0137,dmask=0027`) (`install.sh:744`).
 9. `configure_system` — one `arch-chroot` heredoc: timezone, locale, vconsole,
    hostname/hosts, user, sudoers drop-in (parse-tested via `visudo` + live
    `sudo -l`), services, mkinitcpio HOOKS, kernel cmdline, UKI presets
    (`default` + `fallback`), build + validate UKIs (embed-check both UUIDs),
    install systemd-boot + loader.conf. Passwords set afterward via `chpasswd`
-   over stdin (`install.sh:744`).
+   over stdin (`install.sh:952`).
 10. `finish` — write the non-secret install record, copy the transcript into the
-    target, scrub secrets from env, unmount, offer reboot (`install.sh:973`).
+    target, scrub secrets from env, unmount, offer reboot (`install.sh:1008`).
 
-On any non-zero exit, `on_err` (`install.sh:46`) prints the transcript path and,
+On any non-zero exit, `on_err` (`install.sh:51`) prints the transcript path and,
 only if `DESTRUCTIVE_STARTED=1`, the teardown recovery commands.
 
 ### 4.4 Stage-2 runtime flow (`start.sh` → `core/main.sh`)
@@ -171,22 +171,22 @@ only if `DESTRUCTIVE_STARTED=1`, the teardown recovery commands.
 ### 5.1 Inputs
 
 All input is collected in `gather_input`/`confirm_wipe` before anything
-destructive. Defaults mirror the README (`install.sh:77`): EFI 1 GiB, timezone
+destructive. Defaults mirror the README (`install.sh:84`): EFI 1 GiB, timezone
 `Europe/London`, locale `en_GB.UTF-8`, keymap `us` — all overridable.
 
 Validated inputs:
 
 - **Disk** — must be a whole disk or loop device, not a partition
-  (`install.sh:455`). Accepts `/dev/vda` or bare `vda`.
-- **Hostname** — RFC-style regex, 1–63 chars (`install.sh:471`).
-- **Username** — `^[a-z_][a-z0-9_-]{0,31}$` (`install.sh:474`).
+  (`install.sh:482`). Accepts `/dev/vda` or bare `vda`.
+- **Hostname** — RFC-style regex, 1–63 chars (`install.sh:498`).
+- **Username** — `^[a-z_][a-z0-9_-]{0,31}$` (`install.sh:501`).
 - **Passwords** — root, user, LUKS: entered twice, must match, non-empty
-  (`install.sh:161`).
+  (`install.sh:182`).
 - **Timezone / locale / keymap** — resolved against `/usr/share/zoneinfo`,
   `/etc/locale.gen`, and `localectl list-keymaps`, each with a search helper.
 - **Profile** — `desktop` or `server`; gates `fstrim.timer` and LUKS discards.
 
-### 5.2 Deterministic disk layout (`configure_layout`, `install.sh:403`)
+### 5.2 Deterministic disk layout (`configure_layout`, `install.sh:429`)
 
 No layout prompts. Computed from disk + RAM:
 
@@ -198,23 +198,23 @@ No layout prompts. Computed from disk + RAM:
 | home LV (ext4, `/home`) | remaining space |
 
 A fit check aborts if the fixed regions leave no room for `/home`
-(`install.sh:433`).
+(`install.sh:460`).
 
 ### 5.3 Encryption, LVM, boot (invariants)
 
 - **LUKS2** on partition 2, opened as `/dev/mapper/cryptlvm`. Discards
   (`--allow-discards --persistent`) only on the desktop profile
-  (`install.sh:621`).
+  (`install.sh:648`).
 - **LVM**: single PV on `cryptlvm`, VG named `vg` (or `vg0`, `vg1`… if `vg`
-  already exists on another disk) (`install.sh:638`).
+  already exists on another disk) (`install.sh:665`).
 - **Boot**: mkinitcpio UKI with HOOKS ordering `… sd-encrypt lvm2 filesystems
   fsck`; kernel cmdline references the LUKS container by UUID and root by
   filesystem UUID; `PRESETS=('default' 'fallback')` so both kernels
   (`linux`, `linux-lts`) build a pruned and a recovery image — four UKIs total
-  (`install.sh:838`). systemd-boot installed to the ESP, `loader.conf` default
-  `arch-linux.efi`, `timeout 0`, `editor no`.
+  (`install.sh:867`). systemd-boot installed to the ESP, `loader.conf` default
+  `arch-linux.efi`, `timeout 3`, `editor no`.
 
-### 5.4 Base package set (`install.sh:708`)
+### 5.4 Base package set (`install.sh:93`)
 
 `base linux linux-firmware linux-lts lvm2 vim sudo git networkmanager efibootmgr
 ntfs-3g binutils systemd-ukify` plus the detected microcode (`intel-ucode` /
@@ -228,15 +228,15 @@ enabled; sudoers drop-in fails `visudo -c`, `/etc/sudoers` doesn't include
 `sudoers.d`, or `sudo -l` doesn't resolve the user to an all-commands policy; the
 HOOKS line didn't set as expected; the cmdline is missing a UUID; any of the four
 UKIs is missing/empty; or the systemd-boot loader or its `loader.conf` default is
-absent (`install.sh:720`–`install.sh:899`).
+absent (`install.sh:742`–`install.sh:930`).
 
-### 5.6 Secret handling (`install.sh:754`, `install.sh:919`)
+### 5.6 Secret handling (`install.sh:652`, `install.sh:952`)
 
 Only non-secret values (`CH_TZ`, `CH_HOST`, UUIDs, …) cross into the chroot
 environment. LUKS passphrase is piped to `cryptsetup --key-file -`; root and user
 passwords are piped to `chpasswd` over stdin *after* the chroot heredoc, so no
 password ever appears in the environment, argv, disk, or the transcript.
-`finish` unsets `ROOT_PW USER_PW LUKS_PW` (`install.sh:987`).
+`finish` unsets `ROOT_PW USER_PW LUKS_PW` (`install.sh:1015`).
 
 ## 6. Stage-1: verifier (`verify-install.sh`)
 
@@ -249,13 +249,13 @@ enables, or formats (`verify-install.sh:11`).
   WARN if sudo is unavailable (`verify-install.sh:33`).
 - **Auto-detects** the booted layout (ESP, root source, VG, LUKS backing device,
   disk) and reads profile/username from the install record
-  (`verify-install.sh:72`).
+  (`verify-install.sh:82`).
 - **Section coverage** mirrors install scope exactly: A. partition/LUKS/LVM,
   B. filesystems + fstab hardening, C. base packages + microcode,
   D. localization + identity, E. user + sudo, F. services, G. boot chain (HOOKS,
   cmdline UUID cross-checks, four UKIs with embedded-UUID checks, systemd-boot +
   loader.conf), H. install artifacts.
-- **Exit status** is non-zero if any check FAILs (`verify-install.sh:377`).
+- **Exit status** is non-zero if any check FAILs (`verify-install.sh:420`).
 - **Scope boundary**: post-boot items (Secure Boot, nftables, sysctl, desktop,
   apps, yay, TLP) are explicitly *not* checked (`verify-install.sh:16`).
 
@@ -429,7 +429,7 @@ rather than from `files/`. There is no configuration file for archsetup itself
 and no automation/config interface — every run is interactive.
 
 The one machine-written record is the **install record**
-(`/var/log/archsetup-install.log`, mode 600, no secrets, `install.sh:931`),
+(`/var/log/archsetup-install.log`, mode 600, no secrets, `install.sh:962`),
 consumed by the verifier to recover the profile and username.
 
 ## 11. Quality requirements
@@ -448,7 +448,7 @@ CI enforcing them** (see [§13](#13-future-compatibility)).
 - **The verifier** is the acceptance test for a Stage-1 install: a clean
   `verify-install.sh` run (exit 0, zero FAIL) means the system matches spec.
 - **Testing** is done in VMs / loop-backed disks (the installer accepts loop
-  devices for exactly this, `install.sh:456`).
+  devices for exactly this, `install.sh:482`).
 
 ## 12. Acceptance criteria for a new task script
 
