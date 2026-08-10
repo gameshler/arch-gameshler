@@ -891,7 +891,9 @@ for u in /boot/efi/EFI/Linux/arch-linux.efi          /boot/efi/EFI/Linux/arch-li
     # cmdline (both UUIDs) in its .cmdline PE section. objcopy ships with binutils
     # (installed above). If the section can't be read (format drift), warn rather
     # than abort a good install; a present-but-wrong cmdline is the real hazard.
-    emb="$(objcopy -O binary --only-section=.cmdline "$u" /dev/stdout 2>/dev/null | tr -d '\0')"
+    # `|| emb=""` is load-bearing: this script runs under `set -euo pipefail`, so
+    # without it a failing objcopy kills the chroot here instead of warning below.
+    emb="$(objcopy -O binary --only-section=.cmdline "$u" /dev/stdout 2>/dev/null | tr -d '\0')" || emb=""
     if [ -n "$emb" ]; then
         case "$emb" in *"$CH_LUKS_UUID"*) ;; *)
             echo "UKI $u does not embed the expected LUKS UUID in its cmdline — aborting." >&2; exit 1 ;; esac
