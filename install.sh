@@ -200,6 +200,11 @@ preflight() {
     [[ $EUID -eq 0 ]] || die "This script must run as root (from the Arch live ISO)."
     [[ -d /sys/firmware/efi ]] || die "Not booted in UEFI mode. Enable UEFI in firmware and re-boot the ISO."
 
+    # gather_input is entirely interactive. Under `curl … | bash` stdin is the
+    # pipe, every read hits EOF, and prompt_required would spin forever asking
+    # for a value it can never get. Refuse now and point at the working form.
+    [[ -t 0 ]] || die "stdin is not a terminal — this installer is interactive. Run: bash <(curl -fsSL <url>)"
+
     # Every tool the destructive phases call must exist now — a mid-partition
     # "command not found" would leave the disk half-written. Fail here instead.
     local tool missing=()
