@@ -14,10 +14,8 @@
 
 set -euo pipefail
 
-# start_logging keeps a tee pipe open on a high fd for the whole run; LVM tools
-# inherit it and print a benign "File descriptor N leaked on <cmd> invocation"
-# on every pvcreate/vgcreate/lvcreate. Silence that cosmetic noise — the fd is
-# our transcript pipe, not a real leak, and the LVM operations still succeed.
+# LVM tools inherit start_logging's transcript pipe and warn about a "leaked" fd
+# on every pvcreate/vgcreate/lvcreate. Cosmetic, not a real leak — silence it.
 export LVM_SUPPRESS_FD_WARNINGS=1
 
 # ---------------------------------------------------------------------------
@@ -46,8 +44,8 @@ die()   { printf '\n%sinstall failed during phase: %s%s\n%s%s%s\n' \
              "$C_RED$C_BOLD" "$CURRENT_PHASE" "$C_RESET" "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
 phase() { CURRENT_PHASE="$1"; printf '\n%s########## %s %s\n' "$C_BOLD" "$1" "$C_RESET"; }
 
-# On any unexpected error, print the recovery commands (README.md:170-175) so a
-# partial LUKS/LVM state can be torn down before retrying.
+# On any unexpected error, print the recovery commands so a partial LUKS/LVM
+# state can be torn down before retrying.
 on_err() {
     local exit_code=$?
     # The FIFO itself is disposable; the transcript file it fed is what matters.
@@ -58,8 +56,7 @@ on_err() {
     if [[ -n "${LOG:-}" ]]; then
         printf 'Full transcript of this run (read before rebooting the ISO): %s\n' "$LOG" >&2
     fi
-    # Only show teardown steps if we actually started writing to the disk.
-    # A failure before that (bad input, no network, missing tool) touched nothing.
+    # Nothing is written before partition_disk, so teardown only applies after it.
     if [[ "${DESTRUCTIVE_STARTED:-0}" == "1" ]]; then
         cat >&2 <<'EOF'
 
@@ -83,21 +80,19 @@ trap on_err EXIT
 # ---------------------------------------------------------------------------
 readonly DEF_EFI_SIZE="1G"
 readonly DEF_TIMEZONE="Europe/London"
-readonly DEF_LOCALE="en_GB.UTF-8"   # matches README.md; fully overridable at the prompt
+readonly DEF_LOCALE="en_GB.UTF-8"
 readonly DEF_KEYMAP="us"
 
-# Base package set (README.md:237), minus Secure Boot + base-devel. Declared here
-# rather than inline in install_base so write_install_log can record the exact set
-# this run installed — verify-install.sh audits against the recorded list instead
-# of maintaining a second copy that silently drifts when a package is added here.
+# Base package set (README.md:262), minus Secure Boot + base-devel. Declared here
+# so write_install_log can record it and verify-install.sh can audit against the
+# recorded list, rather than keeping a second copy that silently drifts.
 readonly -a BASE_PKGS=(
     base linux linux-firmware linux-lts
     lvm2 vim sudo git networkmanager
     efibootmgr ntfs-3g binutils systemd-ukify
 )
 
-# The mkinitcpio HOOKS line. Same reasoning as BASE_PKGS: single source of truth,
-# crossed into the chroot as CH_HOOKS and recorded for the verifier to read back.
+# Same reasoning as BASE_PKGS: crossed into the chroot as CH_HOOKS and recorded.
 readonly MKINITCPIO_HOOKS="base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck"
 
 # Populated by the prompt phase.
@@ -200,13 +195,11 @@ preflight() {
     [[ $EUID -eq 0 ]] || die "This script must run as root (from the Arch live ISO)."
     [[ -d /sys/firmware/efi ]] || die "Not booted in UEFI mode. Enable UEFI in firmware and re-boot the ISO."
 
-    # gather_input is entirely interactive. Under `curl … | bash` stdin is the
-    # pipe, every read hits EOF, and prompt_required would spin forever asking
-    # for a value it can never get. Refuse now and point at the working form.
+    # gather_input is interactive; under `curl … | bash` every read hits EOF and
+    # prompt_required would spin forever. Refuse now, and name the working form.
     [[ -t 0 ]] || die "stdin is not a terminal — this installer is interactive. Run: bash <(curl -fsSL <url>)"
 
-    # Every tool the destructive phases call must exist now — a mid-partition
-    # "command not found" would leave the disk half-written. Fail here instead.
+    # A mid-partition "command not found" would leave the disk half-written.
     local tool missing=()
     for tool in sgdisk cryptsetup mkfs.fat mkfs.ext4 mkswap wipefs partprobe \
                 udevadm blkid lsblk pvcreate vgcreate lvcreate vgs pvs \
@@ -240,8 +233,7 @@ connect_wifi() {
 
     local wdev
     # awk's early 'exit' can SIGPIPE iwctl (or iwctl exits non-zero with no
-    # adapter); pipefail would then abort here under set -e, before the wl*
-    # fallback below can run. Guard so an empty result just falls through.
+    # adapter); under pipefail that would abort before the wl* fallback runs.
     wdev="$(iwctl device list 2>/dev/null | awk '/station/{print $2; exit}')" || wdev=""
     if [[ -z "$wdev" ]]; then
         local cand
@@ -304,8 +296,7 @@ setup_network() {
 # ---------------------------------------------------------------------------
 # Phase 3 — interactive prompts (the only manual input)
 # ---------------------------------------------------------------------------
-# Best-effort timezone guess from the public IP (needs network). Returns a valid
-# zone on stdout, or non-zero if it can't determine one.
+# Best-effort timezone guess from the public IP. Echoes a valid zone, or non-zero.
 detect_timezone() {
     local tz="" url
     for url in "https://ipapi.co/timezone" "https://ipinfo.io/timezone"; do
@@ -340,11 +331,9 @@ choose_timezone() {
 
     if [[ -n "$detected" ]]; then
         # '|| GEO_COUNTRY=""' is required: curl -f exits non-zero on 429/5xx and,
-        # with pipefail, would fail this assignment and abort the installer under
-        # set -e (this endpoint is not wrapped like detect_timezone's).
+        # under pipefail, would fail this assignment and abort the installer.
         GEO_COUNTRY="$(curl -fsSL --max-time 5 https://ipapi.co/country 2>/dev/null | tr -d '[:space:]')" || GEO_COUNTRY=""
-        # Geo-IP can return an HTML error body or rate-limit text; only a real
-        # 2-letter ISO code may reach 'reflector --country'.
+        # Geo-IP can return an HTML error body; only a real ISO code may reach reflector.
         [[ "$GEO_COUNTRY" =~ ^[A-Za-z][A-Za-z]$ ]] || GEO_COUNTRY=""
         read -rp "Timezone — detected '$detected'. Enter to accept, type another, or 's' to search: " reply || true
         reply="${reply:-$detected}"
@@ -356,10 +345,9 @@ choose_timezone() {
     resolve_timezone "$reply"
 }
 
-# Resolve a user-typed locale to the exact name in /etc/locale.gen, preferring
-# the UTF-8 variant. Echoes the canonical name (e.g. en_US.UTF-8) or nothing.
-# This is case-insensitive on input but always returns the file's real casing,
-# and a bare "en_US" resolves to en_US.UTF-8 (never the ISO-8859-1 entry).
+# Resolve a user-typed locale to the exact /etc/locale.gen name, preferring UTF-8.
+# Case-insensitive in, the file's real casing out; bare "en_US" never resolves to
+# the ISO-8859-1 entry.
 locale_canonical() {
     awk -v want="$1" '
         BEGIN { lw = tolower(want) }
@@ -411,8 +399,7 @@ choose_keymap() {
             read -rp "  keymap: " reply || true
             continue
         fi
-        # If localectl gave us a list, validate against it (literal, not regex);
-        # otherwise accept.
+        # Validate against localectl's list when we have one (literal, not regex).
         if [[ -z "$keymaps" ]] || printf '%s\n' "$keymaps" | grep -Fxq -- "$reply"; then
             KEYMAP="$reply"
             return 0
@@ -422,21 +409,20 @@ choose_keymap() {
     done
 }
 
-# Deterministic disk layout (no prompts, matches README's swap/root/home form):
-#   swap = total RAM capacity, root = 10% of the disk capped at 100 GiB,
-#   /home = the remaining space. The full layout is shown in the wipe
-#   confirmation before anything is written.
+# Deterministic layout (no prompts, matches README's swap/root/home form): swap =
+# total RAM, root = 10% of the disk capped at 100 GiB, /home = the rest. Shown in
+# the wipe confirmation before anything is written.
 configure_layout() {
     local dsize swap_g root_g
 
     dsize="$(disk_gib "$DISK")"          # whole GiB (floored)
 
-    # Intentional tradeoff: a fixed 1 GiB ESP. It comfortably holds both UKIs
-    # (linux + linux-lts, ~50-120 MiB each) with headroom to spare; a larger ESP
-    # is wasteful for the personal-workstation use case this installer targets.
+    # Fixed 1 GiB ESP: holds all four UKIs (~50-120 MiB each) with headroom, and
+    # more is wasteful for the personal-workstation case this installer targets.
     EFI_SIZE="$DEF_EFI_SIZE"
 
-    # swap = total RAM capacity (whole GiB, rounded up) — enough for hibernation.
+    # swap = total RAM (whole GiB, rounded up), so a hibernation image would fit.
+    # No resume= is set, though: hibernation is out of scope (swap is inside LUKS).
     swap_g="$(ram_gib)"
     if (( swap_g >= 1 )); then SWAP_SIZE="${swap_g}G"; else SWAP_SIZE=""; fi
 
@@ -475,9 +461,9 @@ gather_input() {
         prompt_required DISK "Target disk (e.g. /dev/vda or just vda)"
         [[ "$DISK" != /dev/* && -b "/dev/$DISK" ]] && DISK="/dev/$DISK"
         if [[ -b "$DISK" ]]; then
-            # Must be a whole disk, not a partition — otherwise sgdisk/wipefs
-            # would run against e.g. /dev/sda1 and part_name would build bogus
-            # child names. Allow loop devices so file-backed VM testing works.
+            # Whole disk only: against e.g. /dev/sda1, sgdisk/wipefs would hit the
+            # parent and part_name would build bogus children. Loop devices are
+            # allowed so file-backed VM testing works.
             dtype="$(lsblk -dnro TYPE "$DISK" 2>/dev/null | head -n1)" || dtype=""
             [[ "$dtype" == "disk" || "$dtype" == "loop" ]] && break
             warn "'$DISK' is a ${dtype:-non-disk device}, not a whole disk. Enter the whole disk (e.g. /dev/vda), not a partition."
@@ -492,8 +478,8 @@ gather_input() {
     configure_layout
 
     echo
-    # Validate here, before anything destructive — a bad hostname/username would
-    # otherwise only fail deep inside the chroot (after pacstrap wiped the disk).
+    # Validate before anything destructive — a bad hostname/username would
+    # otherwise only surface deep inside the chroot, long after the wipe.
     prompt_matching HOSTNAME "Hostname" \
         '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$' \
         "Hostname must be 1-63 chars: letters/digits/hyphens, no leading/trailing hyphen."
@@ -528,9 +514,8 @@ gather_input() {
         AuthenticAMD) UCODE="amd-ucode" ;;
         *) UCODE=""; warn "Unknown CPU vendor ('$vendor') — skipping microcode package." ;;
     esac
-    # NOTE: keep this an `if`, not `[[ ... ]] && ok`. As the last statement of the
-    # function the &&-list would return 1 when UCODE is empty and, under `set -e`,
-    # abort the whole installer on any non-Intel/AMD CPU.
+    # Keep this an `if`, not `[[ ... ]] && ok`: as the function's last statement an
+    # &&-list returns 1 when UCODE is empty, aborting the installer under set -e.
     if [[ -n "$UCODE" ]]; then ok "CPU microcode: $UCODE"; fi
 }
 
@@ -541,8 +526,8 @@ confirm_wipe() {
     phase "Confirm disk wipe"
     local bare="${DISK##*/}"
 
-    # Show the device's identity (model + size + serial), not just its path — a
-    # name match alone is too weak a gate before an irreversible wipe.
+    # Model + size + serial, not just the path — a name match alone is too weak a
+    # gate before an irreversible wipe.
     local model size serial
     model="$(lsblk -dno MODEL  "$DISK" 2>/dev/null | head -n1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     size="$(lsblk -dno SIZE    "$DISK" 2>/dev/null | head -n1)"
@@ -567,8 +552,7 @@ confirm_wipe() {
     printf '\n  Hostname: %s    User: %s    Timezone: %s\n  Profile: %s    Microcode: %s\n\n' \
         "$HOSTNAME" "$USERNAME" "$TIMEZONE" "$SYS_PROFILE" "${UCODE:-none}"
 
-    # Refuse if the target (or any partition of it) is mounted at a real path —
-    # catches picking the live USB, or a leftover /mnt from a failed run. Active
+    # Catches picking the live USB, or a leftover /mnt from a failed run. Active
     # swap ([SWAP]) is fine; the teardown handles it.
     if lsblk -nro MOUNTPOINT "$DISK" 2>/dev/null | grep -q '^/'; then
         die "$DISK has mounted partitions. Unmount them (or pick another disk) and re-run."
@@ -600,9 +584,8 @@ teardown_existing() {
     # 2. deactivate VGs whose PV is a crypt device on this disk, then a VG that
     #    sits directly on a partition of this disk (LVM without LUKS).
     while read -r holder; do
-        # pvs on a non-PV (an old EFI/NTFS partition on this disk) exits non-zero;
-        # with pipefail that would fail the assignment and abort teardown under
-        # set -e — the exact case a reinstall hits. Guard the whole substitution.
+        # pvs on a non-PV (an old EFI/NTFS partition here) exits non-zero; under
+        # pipefail that aborts teardown — the exact case a reinstall hits.
         vg="$(pvs --noheadings -o vg_name "$holder" 2>/dev/null | tr -d ' ')" || vg=""
         [[ -n "$vg" ]] && vgchange -an "$vg" 2>/dev/null || true
     done < <(lsblk -pnro NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="crypt"||$2=="part"{print $1}')
@@ -630,8 +613,8 @@ partition_disk() {
     partprobe "$DISK" 2>/dev/null || true
     udevadm settle --timeout=15 2>/dev/null || true
 
-    # Hard gate: don't touch a partition node until the kernel has created it,
-    # otherwise mkfs/cryptsetup can race a slow udev (NVMe/USB) or a stale node.
+    # Don't touch a partition node before the kernel creates it, or mkfs/cryptsetup
+    # can race a slow udev (NVMe/USB) or hit a stale node.
     local p n
     for p in "$PART_EFI" "$PART_LUKS"; do
         for ((n = 0; n < 50; n++)); do [[ -b "$p" ]] && break; sleep 0.1; done
@@ -642,12 +625,12 @@ partition_disk() {
     mkfs.fat -F32 "$PART_EFI"
 
     info "Encrypting $PART_LUKS (LUKS2)"
-    # Discards leak some metadata about used blocks — README says no discards on
-    # servers. Desktop/laptop: enable for SSD TRIM; server: omit.
+    # Discards leak metadata about used blocks, so servers omit them; desktops and
+    # laptops enable them for SSD TRIM.
     local -a open_opts=()
     [[ "$SYS_PROFILE" != "server" ]] && open_opts=(--allow-discards --persistent)
 
-    # Passphrase read from stdin via --key-file - (no ambiguous trailing '-');
+    # --key-file - reads the passphrase from stdin (no ambiguous trailing '-');
     # --batch-mode skips the interactive "type YES" so the pipe doesn't hang.
     printf '%s' "$LUKS_PW" | cryptsetup luksFormat --type luks2 --batch-mode --key-file - "$PART_LUKS"
     printf '%s' "$LUKS_PW" | cryptsetup open --key-file - "${open_opts[@]}" "$PART_LUKS" cryptlvm
@@ -681,17 +664,16 @@ setup_lvm() {
         lvcreate -l 100%FREE     "$VG_NAME" -n root
     fi
 
-    # -q: skip mke2fs's in-place progress counter. It redraws with backspaces
-    # (0x08) that are invisible on a tty but land as literal ^H in the file-
-    # backed transcript, since the log sanitizer only strips ANSI colour.
+    # -q: mke2fs's progress counter redraws with backspaces (0x08) that are
+    # invisible on a tty but land as literal ^H in the transcript, which only
+    # strips ANSI colour.
     mkfs.ext4 -q "/dev/${VG_NAME}/root"
     [[ "$SEPARATE_HOME" == "yes" ]] && mkfs.ext4 -q "/dev/${VG_NAME}/home"
     [[ -n "$SWAP_SIZE" ]] && mkswap "/dev/${VG_NAME}/swap"
 
     info "Mounting target"
     mount "/dev/${VG_NAME}/root" /mnt
-    # Don't trust mount's exit code alone — prove /mnt is the LV we just created
-    # before anything gets pacstrapped onto it.
+    # Prove /mnt is the LV we just created before pacstrap writes to it.
     [[ "$(findmnt -no SOURCE /mnt 2>/dev/null)" == "/dev/mapper/${VG_NAME}-root" ]] \
         || die "/mnt is not the freshly created root LV (/dev/mapper/${VG_NAME}-root) — refusing to continue."
     mkdir -p /mnt/boot/efi
@@ -717,8 +699,8 @@ install_base() {
         [[ -n "$GEO_COUNTRY" ]] && rfl=(--country "$GEO_COUNTRY" "${rfl[@]}")
         info "Ranking mirrors${GEO_COUNTRY:+ (country: $GEO_COUNTRY)}..."
         # reflector can exit 0 yet leave an empty list (over-narrow --country,
-        # transient mirror JSON). Back up first and roll back unless the result
-        # has real Server lines — otherwise pacstrap fails cryptically post-wipe.
+        # transient mirror JSON), and pacstrap would then fail cryptically
+        # post-wipe. Back up first, roll back unless real Server lines landed.
         cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.installsh.bak 2>/dev/null || true
         if reflector "${rfl[@]}" 2>/dev/null && grep -q '^[[:space:]]*Server' /etc/pacman.d/mirrorlist; then
             ok "Mirrorlist ranked."
@@ -741,11 +723,10 @@ install_base() {
     grep -qE '[[:space:]]/[[:space:]]' /mnt/etc/fstab \
         || die "genfstab produced no root (/) entry — aborting before an unbootable install."
 
-    # Harden the vfat EFI mount (README.md:246-279): fmask=0137,dmask=0027.
-    # genfstab emits real options (rw,relatime,fmask=0022,...) with no 'defaults'
-    # token, so rewrite the vfat line's option field: drop any existing f/dmask,
-    # then append the hardened pair. awk only rebuilds the matched line; every
-    # other line (incl. comments) is printed byte-for-byte.
+    # Harden the vfat EFI mount (README.md:276): fmask=0137,dmask=0027. genfstab
+    # emits real options with no 'defaults' token, so rewrite the option field —
+    # drop any existing f/dmask, append the hardened pair. awk rebuilds only the
+    # matched line; everything else is printed byte-for-byte.
     awk -v OFS='\t' '
         $3=="vfat"{
             n=split($4,o,","); opts=""
@@ -771,8 +752,8 @@ configure_system() {
     [[ -n "$luks_uuid" ]] || die "Could not read LUKS UUID from $PART_LUKS"
     [[ -n "$root_uuid" ]] || die "Could not read root filesystem UUID"
 
-    # Only NON-SECRET values cross into the chroot environment. Passwords are set
-    # afterwards via a stdin pipe, so they never touch env, disk, or logs.
+    # Only NON-SECRET values cross into the chroot environment; passwords are set
+    # afterwards over a stdin pipe, never touching env, disk, or logs.
     export CH_TZ="$TIMEZONE" CH_LOCALE="$LOCALE" CH_KEYMAP="$KEYMAP" \
            CH_HOST="$HOSTNAME" CH_USER="$USERNAME" CH_PROFILE="$SYS_PROFILE" \
            CH_LUKS_UUID="$luks_uuid" CH_ROOT_UUID="$root_uuid" \
@@ -781,12 +762,11 @@ configure_system() {
     arch-chroot /mnt /usr/bin/env bash -euo pipefail <<'CHROOT'
 # --- timezone / clock ---
 ln -sf "/usr/share/zoneinfo/$CH_TZ" /etc/localtime
-# Non-fatal: a read-only/absent RTC (some VMs) must not abort a good install
-# post-pacstrap over a cosmetic clock write.
+# Non-fatal: a read-only or absent RTC (some VMs) must not abort a good install.
 hwclock --systohc || echo "warning: could not sync the hardware clock; continuing." >&2
 
-# --- locale: uncomment the exact entry whose first field == the canonical name
-#     (CH_LOCALE came from locale_canonical, so it matches /etc/locale.gen verbatim) ---
+# --- locale: uncomment the entry whose first field == CH_LOCALE, which came from
+#     locale_canonical and so matches /etc/locale.gen verbatim ---
 awk -v L="$CH_LOCALE" '
     { c = $0; sub(/^#[ \t]*/, "", c); split(c, f, /[ \t]+/); if (f[1] == L) sub(/^#[ \t]*/, "", $0) }
     { print }
@@ -817,16 +797,14 @@ useradd -m -G wheel "$CH_USER"
 # --- sudo for wheel via drop-in (never edit /etc/sudoers directly) ---
 echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel
 chmod 440 /etc/sudoers.d/10-wheel
-# A malformed drop-in, or a /etc/sudoers that doesn't include the dir, leaves a
-# system where the user can't escalate — validate both before handing off.
+# A malformed drop-in, or a /etc/sudoers missing the includedir, leaves a system
+# where the user cannot escalate. Validate both before handing off.
 visudo -cf /etc/sudoers.d/10-wheel >/dev/null \
     || { echo "sudoers drop-in /etc/sudoers.d/10-wheel failed validation — aborting." >&2; exit 1; }
 grep -Eq '^[[:space:]]*@?includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers \
     || { echo "/etc/sudoers does not include /etc/sudoers.d — wheel sudo would not apply; aborting." >&2; exit 1; }
-# Definitive escalation test: parse the LIVE, fully-included sudoers via `sudo -l`
-# and confirm the user actually resolves to an all-commands policy. This is a
-# real parse (not a text heuristic) and catches a broken policy now, at install
-# time, instead of leaving the user to discover it post-boot.
+# Definitive escalation test: a real parse of the LIVE, fully-included sudoers
+# (not a text heuristic), so a broken policy fails here and not after first boot.
 sudo -l -U "$CH_USER" 2>/dev/null | grep -Eq '\(ALL[^)]*\)[[:space:]]+ALL' \
     || { echo "sudo policy does not grant '$CH_USER' admin rights (sudo -l parse failed) — aborting." >&2; exit 1; }
 
@@ -835,32 +813,29 @@ systemctl enable NetworkManager
 [ "$CH_PROFILE" != "server" ] && systemctl enable fstrim.timer
 
 # --- mkinitcpio HOOKS: sd-encrypt before lvm2 before filesystems (Arch wiki) ---
-# sed only substitutes an existing uncommented HOOKS= line; if the file format
-# ever drifts (line commented/missing) the substitution is a silent no-op and
-# yields an unbootable initramfs, so assert the result rather than trust it.
+# sed only substitutes an existing uncommented HOOKS= line. If the format ever
+# drifts the substitution is a silent no-op and the initramfs is unbootable, so
+# assert the result rather than trust it.
 sed -i "s|^HOOKS=.*|HOOKS=($CH_HOOKS)|" /etc/mkinitcpio.conf
 grep -qxF "HOOKS=($CH_HOOKS)" /etc/mkinitcpio.conf \
     || { echo "mkinitcpio HOOKS line was not set as expected (unexpected mkinitcpio.conf format) — aborting." >&2; exit 1; }
-# Guard the constant itself, not just that it was written: a reordering that puts
-# lvm2 before sd-encrypt still writes cleanly but yields an unbootable initramfs.
+# Guard the constant's order too: lvm2 before sd-encrypt writes cleanly and still
+# yields an unbootable initramfs.
 grep -Eq '^HOOKS=\(base systemd .*sd-encrypt.*lvm2.*filesystems' /etc/mkinitcpio.conf \
     || { echo "mkinitcpio HOOKS order is wrong (need sd-encrypt before lvm2 before filesystems) — aborting." >&2; exit 1; }
 
 # --- kernel cmdline: unlock LUKS by UUID, find root by filesystem UUID ---
 echo "rd.luks.name=${CH_LUKS_UUID}=cryptlvm root=UUID=${CH_ROOT_UUID} rootfstype=ext4 rw quiet bgrt_disable" > /etc/kernel/cmdline
-# Prove the cmdline carries the intended UUIDs before mkinitcpio bakes it into
-# the UKI — a wrong/empty UUID here produces a silently unbootable image.
+# A wrong or empty UUID here bakes a silently unbootable image, so check first.
 grep -q "$CH_LUKS_UUID" /etc/kernel/cmdline && grep -q "$CH_ROOT_UUID" /etc/kernel/cmdline \
     || { echo "kernel cmdline is missing the expected LUKS/root UUID — aborting." >&2; exit 1; }
 
 # --- UKI presets for linux + linux-lts (README form) ---
-# Each kernel builds TWO images: the normal 'default' UKI (autodetect-pruned,
-# small) and a 'fallback' UKI (-S autodetect => autodetect SKIPPED, so it packs
-# every module) as a recovery path if the pruned image can't find/mount root.
-# NOTE: the README lists fallback_uki/fallback_options but leaves
-# PRESETS=('default'), which means mkinitcpio would NEVER build the fallback.
-# We set PRESETS=('default' 'fallback') so the recovery image is actually
-# produced — a deliberate, correct divergence from the literal README.
+# Each kernel builds TWO images: the pruned 'default' UKI, and a 'fallback' one
+# (-S autodetect => autodetect skipped, so every module is packed) for when the
+# pruned image can't find or mount root. The README lists fallback_uki but leaves
+# PRESETS=('default'), so it would never build that fallback; setting both here is
+# a deliberate divergence.
 cat > /etc/mkinitcpio.d/linux.preset <<'PRESET'
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="/boot/vmlinuz-linux"
@@ -885,19 +860,17 @@ PRESET
 mkdir -p /boot/efi/EFI/Linux
 mkinitcpio -P
 
-# Hard gate: mkinitcpio can print errors yet exit 0 on some preset mistakes.
-# Refuse to finish with a machine that has no bootable kernel image. Both the
-# default AND the fallback UKI bake in the same /etc/kernel/cmdline, so the
-# embed check applies to all four images.
+# mkinitcpio can print errors yet exit 0 on some preset mistakes, so refuse to
+# finish with no bootable kernel image. All four UKIs bake in the same
+# /etc/kernel/cmdline, so the embed check below applies to every one of them.
 for u in /boot/efi/EFI/Linux/arch-linux.efi          /boot/efi/EFI/Linux/arch-linux-fallback.efi \
          /boot/efi/EFI/Linux/arch-linux-lts.efi      /boot/efi/EFI/Linux/arch-linux-lts-fallback.efi; do
     [ -s "$u" ] || { echo "UKI $u was not produced by mkinitcpio — aborting." >&2; exit 1; }
-    # Beyond "the .efi exists": prove each UKI actually EMBEDS the intended kernel
-    # cmdline (both UUIDs) in its .cmdline PE section. objcopy ships with binutils
-    # (installed above). If the section can't be read (format drift), warn rather
-    # than abort a good install; a present-but-wrong cmdline is the real hazard.
-    # `|| emb=""` is load-bearing: this script runs under `set -euo pipefail`, so
-    # without it a failing objcopy kills the chroot here instead of warning below.
+    # Beyond "the .efi exists": prove each UKI embeds both UUIDs in its .cmdline
+    # PE section (objcopy ships with binutils, installed above). An unreadable
+    # section only warns — a present-but-wrong cmdline is the real hazard.
+    # `|| emb=""` is load-bearing: without it a failing objcopy would abort the
+    # chroot under `set -euo pipefail` instead of reaching that warning.
     emb="$(objcopy -O binary --only-section=.cmdline "$u" /dev/stdout 2>/dev/null | tr -d '\0')" || emb=""
     if [ -n "$emb" ]; then
         case "$emb" in *"$CH_LUKS_UUID"*) ;; *)
@@ -917,9 +890,8 @@ if ! bootctl --esp-path=/boot/efi install; then
 fi
 [ -f /boot/efi/EFI/systemd/systemd-bootx64.efi ] \
     || { echo "systemd-boot loader was not installed to the ESP — aborting." >&2; exit 1; }
-# A non-zero timeout is deliberate: mkinitcpio builds fallback UKIs for both
-# linux and linux-lts, and with `timeout 0` the menu is only reachable by holding
-# Space at boot — so those recovery entries are unusable exactly when they're needed.
+# The non-zero timeout is deliberate: with `timeout 0` the menu is only reachable
+# by holding Space, making the fallback UKIs unusable exactly when they're needed.
 cat > /boot/efi/loader/loader.conf <<LOADER
 default         arch-linux.efi
 timeout         3
@@ -928,18 +900,16 @@ editor          no
 LOADER
 grep -q '^default[[:space:]]*arch-linux.efi' /boot/efi/loader/loader.conf \
     || { echo "loader.conf was not written to the ESP with the expected default — aborting." >&2; exit 1; }
-# Only enable the auto-update service if the target actually ships the unit —
-# enabling a nonexistent unit would abort the run over a non-critical service.
+# Enabling a unit the target doesn't ship would abort the run over a non-critical service.
 if [ -e /usr/lib/systemd/system/systemd-boot-update.service ]; then
     systemctl enable systemd-boot-update.service
 else
     echo "warning: systemd-boot-update.service not present in target; skipping enable." >&2
 fi
 
-# Post-install validation: confirm systemd-boot parses a real bootable entry for
-# our UKI from the ESP (reads the ESP; no EFI variables required). Informational
-# — bootctl can be terse in an offline chroot, so warn rather than abort; the
-# .cmdline embed check above is the deterministic gate.
+# Confirm systemd-boot parses a real entry off the ESP (no EFI variables needed).
+# Informational only: bootctl can be terse in an offline chroot, and the .cmdline
+# embed check above is the deterministic gate.
 if bootctl --esp-path=/boot/efi list 2>/dev/null | grep -q 'arch-linux\.efi'; then
     echo "bootctl: arch-linux.efi boot entry present on the ESP." >&2
 else
@@ -947,18 +917,17 @@ else
 fi
 CHROOT
 
-    # Set passwords WITHOUT env/heredoc exposure: piped to chpasswd over stdin,
-    # invisible to /proc/<pid>/environ, shell traces, and disk.
+    # Piped to chpasswd over stdin, so invisible to /proc/<pid>/environ, shell
+    # traces, and disk.
     printf 'root:%s\n' "$ROOT_PW"           | arch-chroot /mnt chpasswd
     printf '%s:%s\n' "$USERNAME" "$USER_PW" | arch-chroot /mnt chpasswd
 
     ok "System configured, UKIs generated, systemd-boot installed."
 }
 
-# Write a non-secret install record onto the target for later debugging: the
-# exact disk, layout, identity, and boot artifacts that produced this system.
-# Best-effort — never contains passwords, and a logging failure must not fail a
-# successful install.
+# Record the disk, layout, identity, and boot artifacts that produced this system,
+# for later debugging. Best-effort and never secret: a logging failure must not
+# fail an otherwise successful install.
 write_install_log() {
     local logf="/mnt/var/log/archsetup-install.log" mirror_src
     mkdir -p /mnt/var/log 2>/dev/null || return 0
@@ -991,8 +960,7 @@ write_install_log() {
         echo   "locale:        $LOCALE"
         echo   "keymap:        $KEYMAP"
         echo   "mirror_src:    $mirror_src"
-        # Read back by verify-install.sh so the audit follows this installer
-        # instead of keeping its own copy of the same two lists.
+        # Read back by verify-install.sh instead of it keeping its own copies.
         echo   "packages:      ${BASE_PKGS[*]}"
         echo   "hooks:         $MKINITCPIO_HOOKS"
         echo   "boot_uki:      $(for f in /mnt/boot/efi/EFI/Linux/*.efi; do [ -e "$f" ] && printf '%s ' "${f#/mnt}"; done)"
@@ -1015,7 +983,7 @@ finish() {
     unset ROOT_PW USER_PW LUKS_PW
 
     # Print the hand-off BEFORE sealing the transcript, so the copy on the target
-    # ends with the completion banner rather than stopping mid-teardown.
+    # ends with the completion banner rather than mid-teardown.
     cat <<EOF
 
 ${C_GREEN}${C_BOLD}Base install complete.${C_RESET}
@@ -1026,17 +994,16 @@ After you reboot and log in as '${USERNAME}', run the post-install setup:
 
 EOF
 
-    # Copy the run transcript into the target — the ISO's copy is on tmpfs and
-    # vanishes on reboot; this keeps it on the installed system. stop_logging must
-    # come first or the copy is a truncated snapshot of a still-open tee pipe.
+    # The ISO's copy is on tmpfs and vanishes on reboot, so keep one on the target.
+    # stop_logging must come first, or the copy is a truncated snapshot of a
+    # still-open tee pipe.
     local saved=""
     if [[ -n "$LOG" ]]; then
         stop_logging
         if [[ -f "$LOG" ]] && mkdir -p /mnt/var/log 2>/dev/null \
            && cp -f "$LOG" /mnt/var/log/ 2>/dev/null; then
-            # Match the install record's 600: the transcript carries the same
-            # non-secret identity data (disk serial, hostname, username) and has
-            # no reason to be world-readable on the installed system.
+            # Match the install record's 600: same non-secret identity data
+            # (disk serial, hostname, username), no reason to be world-readable.
             chmod 600 "/mnt/var/log/$(basename "$LOG")" 2>/dev/null || true
             saved="/var/log/$(basename "$LOG")"
         fi
@@ -1062,11 +1029,10 @@ EOF
     fi
 }
 
-# Tee the entire run (stdout+stderr) to a timestamped transcript so a fast-
-# scrolling — or failed — run can be read back afterwards. Colour is kept on the
-# terminal but stripped from the file so it stays greppable and pasteable. The
-# live ISO root is tmpfs (lost on reboot), so finish() copies this into the
-# target on success; on failure it stays on the ISO for you to read first.
+# Tee the whole run (stdout+stderr) to a timestamped transcript so a fast-scrolling
+# or failed run can be read back. Colour stays on the terminal but is stripped from
+# the file, keeping it greppable. finish() copies it onto the target on success; on
+# failure it stays on the ISO to be read before rebooting.
 start_logging() {
     local ts; ts="$(date +%Y%m%d-%H%M%S)"
     LOG="/var/log/archsetup-install-${ts}.log"
@@ -1085,23 +1051,21 @@ start_logging() {
 
     exec {ORIG_OUT}>&1 {ORIG_ERR}>&2
     # A real background job, deliberately NOT a process substitution: bash cannot
-    # `wait` on a process substitution (bare `wait` returns immediately and leaves
-    # it draining), so finish() would copy a half-written file. With a named pipe
-    # and a job PID, stop_logging waits for a definite EOF-and-exit.
+    # `wait` on one, so finish() would copy a half-written file. A named pipe plus
+    # a job PID lets stop_logging wait for a definite EOF-and-exit.
     { tee "/dev/fd/$ORIG_OUT" < "$LOG_FIFO" \
         | sed -u 's/\x1b\[[0-9;]*m//g' >> "$LOG"; } &
     LOG_PID=$!
-    # Hold the pipe open read-write before redirecting: without a reader present,
-    # `exec 1>fifo` blocks forever, which would hang the installer at startup if
-    # the writer job ever failed to come up.
+    # Hold the pipe open read-write first: with no reader present `exec 1>fifo`
+    # blocks forever, hanging the installer if the writer job failed to come up.
     exec {LOG_HOLD}<>"$LOG_FIFO"
     exec 1>"$LOG_FIFO" 2>&1
     info "Full transcript of this run: $LOG"
 }
 
-# Seal the transcript: restore the terminal fds (dropping our last references to
-# the pipe's write end, so the writer sees EOF) and wait for the writer to exit.
-# Only after this is $LOG complete and safe to copy.
+# Seal the transcript: restore the terminal fds, dropping the last references to
+# the pipe's write end so the writer sees EOF, then wait for it. $LOG is only
+# complete and safe to copy after this returns.
 stop_logging() {
     [[ -n "$LOG_PID" ]] || return 0
     # The leading 1 is required: bare `>&word` is bash's `&>word` shorthand

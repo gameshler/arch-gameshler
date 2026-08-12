@@ -30,11 +30,10 @@
 set -uo pipefail   # NOT -e: we want every check to run even after a failure.
 
 # Re-exec under sudo so privileged reads (luksDump, blkid on raw parts, sudoers.d)
-# work. Only when $0 is a real file sudo can reopen: under the documented
-# `bash <(curl …)` form $0 is /dev/fd/N — an fd of *this* shell, which the sudo
-# child cannot reopen — and under `curl … | bash` it is plain "bash", where the
-# re-exec would drop the user into an interactive root shell instead of running
-# the audit. In both cases fall through and let the privileged checks WARN.
+# work — but only when $0 is a real file sudo can reopen. Under `bash <(curl …)`
+# it is /dev/fd/N, an fd of *this* shell; under `curl … | bash` it is plain "bash",
+# where the re-exec would open an interactive root shell instead of auditing.
+# Both cases fall through and let the privileged checks WARN.
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     if [[ -f "$0" && -r "$0" ]] && command -v sudo >/dev/null 2>&1; then
         exec sudo -- "$0" "$@"
@@ -59,12 +58,10 @@ sect() { printf '\n%s== %s ==%s\n' "$C_BOLD$C_BLUE" "$1" "$C_RESET"; }
 assert() { if [[ "$2" == "0" ]]; then pass "$1"; else fail "$1" "${3:-}"; fi; }
 
 # ---------------------------------------------------------------------------
-# Tee the whole audit (stdout+stderr) to a timestamped transcript so a fast-
-# scrolling or partial run can be read back and diffed later — same idea as
-# install.sh's run transcript. Colour is kept on the terminal but stripped from
-# the file so it stays greppable and pasteable. This runs AFTER the sudo re-exec
-# above, so there is exactly one log, written as root into /var/log. Best-effort:
-# if /var/log isn't writable we fall back to $TMPDIR, then give up silently.
+# Tee the whole audit to a timestamped transcript so a fast-scrolling or partial
+# run can be read back and diffed later, same as install.sh's. Runs AFTER the sudo
+# re-exec, so there is exactly one log, written as root. Best-effort: fall back to
+# $TMPDIR if /var/log isn't writable, then give up silently.
 LOG=""
 start_logging() {
     local ts; ts="$(date +%Y%m%d-%H%M%S)"
@@ -85,16 +82,14 @@ REC="/var/log/archsetup-install.log"
 
 # rec <key> [fallback] — read a field from the install record.
 #
-# The record is written by the very install.sh that built this system, so
-# preferring it keeps the two scripts from drifting: add a package or reorder
-# HOOKS in install.sh and this audit follows automatically instead of checking a
-# stale second copy. The fallback is what install.sh used when this verifier was
-# written, so a system installed before the record carried that field still gets
-# audited rather than skipped.
+# The record comes from the very install.sh that built this system, so preferring
+# it keeps the two from drifting: add a package or reorder HOOKS there and this
+# audit follows. The fallback is what install.sh used when this verifier was
+# written, so pre-record systems are still audited rather than skipped.
 #
-# Stable identifiers (cryptlvm, the EFI partition label, arch-linux.efi) are
-# deliberately NOT read from the record: they are contract, and if one ever
-# changes, this audit *should* fail loudly rather than quietly follow along.
+# Stable identifiers (cryptlvm, the EFI label, arch-linux.efi) are deliberately
+# NOT read from the record — they are contract, and this audit should fail loudly
+# if one ever changes rather than quietly follow along.
 rec() {
     local key="$1" val=""
     if [[ -r "$REC" ]]; then
@@ -117,8 +112,7 @@ PROFILE="$(rec profile)"
 USER_NAME="$(rec username)"
 [[ -z "$USER_NAME" ]] && USER_NAME="$(awk -F: '$3>=1000 && $3<65534 && $1!="nobody"{print $1; exit}' /etc/passwd)"
 
-# Expectations that install.sh owns. Fallbacks match install.sh at the time of
-# writing; a present record overrides them. See rec() above.
+# Expectations install.sh owns; a present record overrides these. See rec() above.
 EXPECT_PKGS="$(rec packages 'base linux linux-firmware linux-lts lvm2 vim sudo git networkmanager efibootmgr ntfs-3g binutils systemd-ukify')"
 EXPECT_HOOKS="$(rec hooks 'base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck')"
 
@@ -179,10 +173,9 @@ for lv in root home swap; do
     fi
 done
 if lvs --noheadings -o lv_name "$VG" 2>/dev/null | tr -d ' ' | grep -qx swap; then
-    # Match by canonical device, not by name: the kernel reports an LVM swap in
-    # /proc/swaps (what `swapon --show` reads) as /dev/dm-N, while the LV lives at
-    # /dev/${VG}/swap -> /dev/mapper/${VG}-swap. readlink -f collapses all three to
-    # the same node so a genuinely-active swap isn't mis-flagged inactive.
+    # Match by canonical device, not name: /proc/swaps reports an LVM swap as
+    # /dev/dm-N while the LV lives at /dev/${VG}/swap. readlink -f collapses both
+    # to the same node, so an active swap isn't mis-flagged inactive.
     swap_real="$(readlink -f "/dev/${VG}/swap" 2>/dev/null)"
     swap_active=0
     if [[ -n "$swap_real" ]]; then

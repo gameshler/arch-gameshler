@@ -122,9 +122,8 @@ get_uuid_fstype() {
 }
 
 # Prompt for and fully validate the mount point BEFORE anything destructive runs.
-# The /etc/fstab collision check lives here rather than in update_fstab: formatting
-# first and only then discovering the path is taken would leave a wiped drive and
-# no entry. Nothing here touches the device.
+# The /etc/fstab collision check lives here, not in update_fstab: formatting first
+# and only then finding the path taken would leave a wiped drive and no entry.
 choose_mount_point() {
     read -rp "Enter the mount point path (e.g., /mnt/data): " mount_point || true
     [[ "$mount_point" == /* ]] || die "Mount point must be an absolute path."
@@ -151,8 +150,6 @@ update_fstab() {
         msg "An /etc/fstab entry for UUID=$UUID already exists — leaving it untouched."
         return 0
     fi
-    # NOTE: the mount-point collision check ran in choose_mount_point, before the
-    # format. Only the UUID check belongs here — the UUID isn't known until after.
 
     # xfs/btrfs are not fsck'd at boot -> pass 0; ext-family -> pass 2.
     local pass=2
@@ -174,9 +171,8 @@ update_fstab() {
 
 mount_drive() {
     msg "Mounting $partition at $mount_point..."
-    # `|| true`: under `set -e` a failing mount would abort here, so the die()
-    # below (and its "the fstab entry was kept" hint) would never be reached.
-    # Let it fail, then report through the findmnt check.
+    # `|| true`: under `set -e` a failing mount would abort before the die() below
+    # (and its "entry was kept" hint) could run. Report via the findmnt check.
     sudo mount "$mount_point" || true
     if findmnt -no TARGET "$mount_point" >/dev/null 2>&1; then
         msg "Drive mounted successfully at $mount_point."
