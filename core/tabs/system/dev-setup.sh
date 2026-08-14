@@ -15,6 +15,7 @@ install_pkgs() {
 
         # PNPM
         curl -fsSL https://get.pnpm.io/install.sh | sh -
+        pnpm install -g bun
     else
         printf "%b\n" "Packages are already installed."
     fi
