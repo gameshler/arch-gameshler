@@ -3,7 +3,7 @@
 . "$COMMON_SCRIPT"
 
 install_pkgs() {
-    if ! command_exists nvm pnpm; then
+    if ! command_exists nvm bun; then
         printf "%b\n" "Installing Packages..."
 
         # NVM
@@ -13,9 +13,7 @@ install_pkgs() {
         [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
         [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 
-        # PNPM
-        curl -fsSL https://get.pnpm.io/install.sh | sh -
-        pnpm install -g bun
+        curl -fsSL https://bun.sh/install | bash
     else
         printf "%b\n" "Packages are already installed."
     fi
