@@ -62,7 +62,7 @@ main() {
         libreoffice-fresh vlc curl flatpak fastfetch p7zip unrar tar rsync \
         exfat-utils fuse-exfat flac jdk-openjdk gimp \
         base-devel mangohud lib32-mangohud \
-        htop steam reflector git
+        htop steam reflector python git
 
     choose_installation
     sudo cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak
